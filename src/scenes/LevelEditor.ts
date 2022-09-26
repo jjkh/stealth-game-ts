@@ -1,6 +1,9 @@
 import Canvas, { contains, Point, Rect } from "../lib/Canvas";
 import Scene from "../lib/Scene";
 
+const GRID_STEP = 16;
+const EYE_RADIUS = 6;
+
 const grow = (r: Rect, s: number) => { return { x: r.x - s / 2, y: r.y - s / 2, w: r.w + s, h: r.h + s }; };
 const snap = (p: Point) => { return { x: Math.floor(p.x / GRID_STEP) * GRID_STEP, y: Math.floor(p.y / GRID_STEP) * GRID_STEP }; };
 const overlaps = (a: Rect, b: Rect) =>
@@ -9,6 +12,7 @@ const overlaps = (a: Rect, b: Rect) =>
     && a.y < (b.y + b.h)
     && (a.y + a.h) > b.y;
 const crossProduct = (a: Point, b: Point) => a.x * b.y - b.x * a.y;
+const circleContains = (centre: Point, radius: number, p: Point) => (p.x - centre.x) ** 2 + (p.y - centre.y) ** 2 < radius ** 2;
 
 class Line {
     start: Point;
@@ -58,13 +62,50 @@ class Line {
     }
 }
 
-const GRID_STEP = 16;
-
 class RevArray<T> extends Array<T> {
     *revEntries(): IterableIterator<[number, T]> {
         for (let i = this.length - 1; i >= 0; i--)
             yield [i, this[i]];
     }
+}
+
+class Eye {
+    pos: Point = { x: 0, y: 0 };
+    rays?: Array<Line>;
+
+    constructor(p: Point) {
+        this.pos = Object.assign({}, p);
+    }
+
+    draw(canvas: Canvas, walls: Array<EditableWall>, colour = '#000', lineWidth = 1) {
+        canvas.ctx.strokeStyle = colour;
+        canvas.ctx.lineWidth = lineWidth;
+
+        if (this.rays === undefined)
+            this.castRays(walls);
+
+        for (const ray of this.rays!)
+            canvas.drawLine(ray.start, ray.end);
+    }
+
+    castRays(walls: Array<EditableWall>) {
+        this.rays = [];
+        for (const wall of walls) {
+            for (const corner of wall.corners()) {
+                const ray = new Line(this.pos, corner);
+                let shouldAdd = true;
+                for (const wall2 of walls) {
+                    if (wall2.intersects(ray)) {
+                        shouldAdd = false;
+                        break;
+                    }
+                }
+                if (shouldAdd)
+                    this.rays.push(ray);
+            }
+        }
+    }
+
 }
 
 abstract class Tool {
@@ -84,25 +125,37 @@ abstract class Tool {
 
 class HandTool extends Tool {
     readonly kind = 'hand';
-    dragging?: EditableWall | undefined;
+    dragging?: EditableWall | Eye | undefined;
     dragStart?: Point;
 
     onPointerMove(_ev: PointerEvent, p: Point) {
-        if (this.dragging && this.dragStart)
-            Object.assign(this.dragging.rect, snap({ x: p.x - this.dragStart.x, y: p.y - this.dragStart.y }));
-
-        return true;
+        if (this.dragStart) {
+            const newPos = { x: p.x - this.dragStart.x, y: p.y - this.dragStart.y };
+            if (this.dragging instanceof EditableWall) {
+                Object.assign(this.dragging.rect, snap(newPos));
+                this.editor.onWallsUpdated();
+            } else if (this.dragging instanceof Eye) {
+                this.dragging.pos = newPos;
+                this.dragging.rays = undefined;
+            }
+        }
     }
 
     onPointerUp() {
         this.dragging = undefined;
         this.dragStart = undefined;
-
-        return true;
     }
 
     onPointerDown(_ev: PointerEvent, p: Point) {
         if (this.dragging) return;
+
+        for (const [_, eye] of this.editor.eyes.entries()) {
+            if (circleContains(eye.pos, EYE_RADIUS, p)) {
+                this.dragging = eye;
+                this.dragStart = { x: p.x - eye.pos.x, y: p.y - eye.pos.y };
+                return;
+            }
+        }
 
         for (const [_, wall] of this.editor.walls.revEntries()) {
             if (contains(wall.rect, p)) {
@@ -128,8 +181,10 @@ class AddTool extends Tool {
     }
 
     onPointerUp() {
-        if (this.phantomWall)
+        if (this.phantomWall) {
             this.editor.walls.push(this.phantomWall);
+            this.editor.onWallsUpdated();
+        }
         this.phantomWall = undefined;
         this.dragStart = undefined;
     }
@@ -153,9 +208,17 @@ class RemoveTool extends Tool {
     readonly kind = 'remove';
 
     onPointerUp(_ev: PointerEvent, p: Point) {
+        for (const [i, eye] of this.editor.eyes.entries()) {
+            if (circleContains(eye.pos, EYE_RADIUS, p)) {
+                this.editor.eyes.splice(i, 1);
+                return;
+            }
+        }
+
         for (const [i, wall] of this.editor.walls.revEntries()) {
             if (contains(wall.rect, p)) {
                 this.editor.walls.splice(i, 1);
+                this.editor.onWallsUpdated();
                 return;
             }
         }
@@ -164,51 +227,30 @@ class RemoveTool extends Tool {
 
 class EyeTool extends Tool {
     readonly kind = 'eye';
-    pos: Point = { x: 0, y: 0 };
-    rays?: Array<Line>;
+    activeEye?: Eye;
 
     draw(canvas: Canvas) {
-        canvas.ctx.strokeStyle = '#0b4161';
-        canvas.ctx.lineWidth = 2;
-
-        if (!this.rays)
-            this.castRays();
-
-        for (let ray of this.rays!)
-            canvas.drawLine(ray.start, ray.end);
+        this.activeEye?.draw(canvas, this.editor.walls, '#0b4161', 2);
     }
 
     onPointerMove(_ev: PointerEvent, p: Point) {
-        this.pos = Object.assign({}, p);
-        this.rays = undefined;
+        this.activeEye = new Eye(p);
     }
 
-    castRays() {
-        this.rays = [];
-        for (const wall of this.editor.walls) {
-            for (const corner of wall.corners()) {
-                const ray = new Line(this.pos, corner);
-                let shouldAdd = true;
-                for (const wall2 of this.editor.walls) {
-                    if (wall2.intersects(ray)) {
-                        shouldAdd = false;
-                        break;
-                    }
-                }
-                if (shouldAdd)
-                    this.rays.push(ray);
-            }
-        }
+    onPointerUp(): void {
+        if (this.activeEye)
+            this.editor.eyes.push(this.activeEye);
     }
 }
 
 export default class LevelEditor extends Scene {
     walls: RevArray<EditableWall> = new RevArray<EditableWall>();
+    eyes: Array<Eye> = [];
     buttons = [
         new Button(
             { x: 0, y: 0, w: 40, h: 40 },
             '🖐',
-            'drag wall to move',
+            'drag wall/eye to move',
             () => { this.activeTool = new HandTool(this); this.buttons.map((b, i) => b.pressed = i === 0); }
         ),
         new Button(
@@ -220,7 +262,7 @@ export default class LevelEditor extends Scene {
         new Button(
             { x: 0, y: 80, w: 40, h: 40 },
             '➖',
-            'click to remove wall',
+            'click to remove wall or eye',
             () => { this.activeTool = new RemoveTool(this); this.buttons.map((b, i) => b.pressed = i === 2); }
         ),
         new Button(
@@ -263,13 +305,18 @@ export default class LevelEditor extends Scene {
             this.canvas.ctx.globalAlpha = 1;
         }
 
+        for (const eye of this.eyes) {
+            eye.draw(this.canvas, this.walls);
+            this.canvas.fillCircle(eye.pos, EYE_RADIUS, '#d66');
+        }
+
         this.activeTool.draw?.(this.canvas);
 
         for (let button of this.buttons)
             button.draw(this.canvas);
     }
 
-    onPointerUp(ev: PointerEvent, p: Point): void {
+    onPointerUp(ev: PointerEvent, p: Point) {
         for (let button of this.buttons) {
             if (contains(button.rect, p)) {
                 button.onclick();
@@ -280,15 +327,20 @@ export default class LevelEditor extends Scene {
         this.activeTool.onPointerUp?.(ev, p);
     }
 
-    onPointerDown(ev: PointerEvent, p: Point): void {
+    onPointerDown(ev: PointerEvent, p: Point) {
         this.activeTool.onPointerDown?.(ev, p);
     }
 
-    onPointerMove(ev: PointerEvent, p: Point): void {
-        for (let button of this.buttons)
+    onPointerMove(ev: PointerEvent, p: Point) {
+        for (const button of this.buttons)
             button.hovered = contains(button.rect, p);
 
         this.activeTool.onPointerMove?.(ev, p);
+    }
+
+    onWallsUpdated() {
+        for (const eye of this.eyes)
+            eye.rays = undefined;
     }
 }
 
