@@ -3,14 +3,67 @@ import Scene from "../lib/Scene";
 
 const grow = (r: Rect, s: number) => { return { x: r.x - s / 2, y: r.y - s / 2, w: r.w + s, h: r.h + s }; };
 const snap = (p: Point) => { return { x: Math.floor(p.x / GRID_STEP) * GRID_STEP, y: Math.floor(p.y / GRID_STEP) * GRID_STEP }; };
+const overlaps = (a: Rect, b: Rect) =>
+    a.x < (b.x + b.w)
+    && (a.x + a.w) > b.x
+    && a.y < (b.y + b.h)
+    && (a.y + a.h) > b.y;
+const crossProduct = (a: Point, b: Point) => a.x * b.y - b.x * a.y;
+
+class Line {
+    start: Point;
+    end: Point;
+
+    constructor(start: Point, end: Point) {
+        this.start = Object.assign({}, start);
+        this.end = Object.assign({}, end);
+    }
+
+    intersects(other: Line): boolean {
+        return overlaps(this.boundingRect(), other.boundingRect())
+            && this.touchesOrCrossesLine(other)
+            && other.touchesOrCrossesLine(this);
+    }
+
+    boundingRect(): Rect {
+        const x = [this.start.x, this.end.x].sort((a, b) => a - b);
+        const y = [this.start.y, this.end.y].sort((a, b) => a - b);
+
+        return { x: x[0], y: y[0], w: x[1] - x[0], h: y[1] - y[0] };
+    }
+
+    pointOnLine(p: Point): boolean {
+        const diffLine = this.difference();
+        const relPoint = { x: p.x - this.start.x, y: p.y - this.start.y };
+
+        const r = crossProduct(diffLine.end, relPoint);
+        return Math.abs(r) < 0.0001;
+    }
+
+    pointRightOfLine(p: Point): boolean {
+        const diffLine = this.difference();
+        const relPoint = { x: p.x - this.start.x, y: p.y - this.start.y };
+
+        return crossProduct(diffLine.end, relPoint) > 0;
+    }
+
+    touchesOrCrossesLine(other: Line): boolean {
+        return this.pointOnLine(other.start)
+            || this.pointOnLine(other.end)
+            || (this.pointRightOfLine(other.start) != this.pointRightOfLine(other.end));
+    }
+
+    difference(): Line {
+        return new Line({ x: 0, y: 0 }, { x: this.end.x - this.start.x, y: this.end.y - this.start.y });
+    }
+}
 
 const GRID_STEP = 16;
 
 class RevArray<T> extends Array<T> {
     *revEntries(): IterableIterator<[number, T]> {
-        for (let i = this.length - 1; i >= 0; i--) {
+        for (let i = this.length - 1; i >= 0; i--)
             yield [i, this[i]];
-        }
     }
 }
 
@@ -25,6 +78,8 @@ abstract class Tool {
     onPointerMove?(ev: PointerEvent, p: Point): void;
     onPointerUp?(ev: PointerEvent, p: Point): void;
     onPointerDown?(ev: PointerEvent, p: Point): void;
+
+    draw?(canvas: Canvas): void;
 }
 
 class HandTool extends Tool {
@@ -58,6 +113,7 @@ class HandTool extends Tool {
         }
     }
 }
+
 class AddTool extends Tool {
     readonly kind = 'add';
     phantomWall?: EditableWall | undefined;
@@ -65,17 +121,10 @@ class AddTool extends Tool {
 
     onPointerMove(_ev: PointerEvent, p: Point) {
         this.phantomWall ??= new EditableWall({ w: GRID_STEP, h: GRID_STEP });
-
-        const containingRect = (a: Point, b: Point) => {
-            return {
-                x: Math.min(a.x, b.x),
-                y: Math.min(a.y, b.y),
-                w: Math.abs(a.x - b.x) + GRID_STEP,
-                h: Math.abs(a.y - b.y) + GRID_STEP,
-            };
-        };
         const start = this.dragStart ?? snap(p);
-        this.phantomWall.rect = containingRect(start, snap(p));
+        this.phantomWall.rect = new Line(start, snap(p)).boundingRect();
+        this.phantomWall.rect.w += GRID_STEP;
+        this.phantomWall.rect.h += GRID_STEP;
     }
 
     onPointerUp() {
@@ -90,7 +139,16 @@ class AddTool extends Tool {
         this.dragStart = snap(p);
         this.onPointerMove(ev, p);
     }
+
+    draw(canvas: Canvas): void {
+        if (this.phantomWall) {
+            canvas.ctx.globalAlpha = 0.6;
+            this.phantomWall.draw(canvas);
+            canvas.ctx.globalAlpha = 1;
+        }
+    }
 }
+
 class RemoveTool extends Tool {
     readonly kind = 'remove';
 
@@ -99,6 +157,46 @@ class RemoveTool extends Tool {
             if (contains(wall.rect, p)) {
                 this.editor.walls.splice(i, 1);
                 return;
+            }
+        }
+    }
+}
+
+class EyeTool extends Tool {
+    readonly kind = 'eye';
+    pos: Point = { x: 0, y: 0 };
+    rays?: Array<Line>;
+
+    draw(canvas: Canvas) {
+        canvas.ctx.strokeStyle = '#0b4161';
+        canvas.ctx.lineWidth = 2;
+
+        if (!this.rays)
+            this.castRays();
+
+        for (let ray of this.rays!)
+            canvas.drawLine(ray.start, ray.end);
+    }
+
+    onPointerMove(_ev: PointerEvent, p: Point) {
+        this.pos = Object.assign({}, p);
+        this.rays = undefined;
+    }
+
+    castRays() {
+        this.rays = [];
+        for (const wall of this.editor.walls) {
+            for (const corner of wall.corners()) {
+                const ray = new Line(this.pos, corner);
+                let shouldAdd = true;
+                for (const wall2 of this.editor.walls) {
+                    if (wall2.intersects(ray)) {
+                        shouldAdd = false;
+                        break;
+                    }
+                }
+                if (shouldAdd)
+                    this.rays.push(ray);
             }
         }
     }
@@ -129,10 +227,10 @@ export default class LevelEditor extends Scene {
             { x: 0, y: 120, w: 40, h: 40 },
             '👁',
             'cast rays',
-            () => { this.activeTool = new RemoveTool(this); this.buttons.map((b, i) => b.pressed = i === 3); }
+            () => { this.activeTool = new EyeTool(this); this.buttons.map((b, i) => b.pressed = i === 3); }
         ),
     ];
-    activeTool: HandTool | AddTool | RemoveTool = new AddTool(this);
+    activeTool: HandTool | AddTool | RemoveTool | EyeTool = new AddTool(this);
 
     constructor(canvas: Canvas) {
         super(canvas);
@@ -164,6 +262,8 @@ export default class LevelEditor extends Scene {
             this.activeTool.phantomWall.draw(this.canvas);
             this.canvas.ctx.globalAlpha = 1;
         }
+
+        this.activeTool.draw?.(this.canvas);
 
         for (let button of this.buttons)
             button.draw(this.canvas);
@@ -204,6 +304,23 @@ class EditableWall {
 
     constructor(rect: { x?: number, y?: number, w?: number, h?: number; }) {
         this.rect = Object.assign({ x: 0, y: 0, w: 1, h: 1 }, rect);
+    }
+
+    *corners(): IterableIterator<Point> {
+        yield { x: this.left, y: this.top };
+        yield { x: this.left, y: this.bottom };
+        yield { x: this.right, y: this.top };
+        yield { x: this.right, y: this.bottom };
+    }
+
+    intersects(other: Line): boolean {
+        const lines = [
+            new Line({ x: this.left, y: this.top }, { x: this.right, y: this.top }),       // top
+            new Line({ x: this.left, y: this.top }, { x: this.left, y: this.bottom }),     // left
+            new Line({ x: this.left, y: this.bottom }, { x: this.right, y: this.bottom }), // bottom
+            new Line({ x: this.right, y: this.top }, { x: this.right, y: this.bottom }),   // right
+        ];
+        return lines.some(line => line.intersects(other));
     }
 
     draw(canvas: Canvas) {
