@@ -14,7 +14,7 @@ const overlaps = (a: Rect, b: Rect) =>
 const crossProduct = (a: Point, b: Point) => a.x * b.y - b.x * a.y;
 const circleContains = (centre: Point, radius: number, p: Point) => (p.x - centre.x) ** 2 + (p.y - centre.y) ** 2 < radius ** 2;
 
-class Line {
+class LineSegment {
     start: Point;
     end: Point;
 
@@ -23,10 +23,48 @@ class Line {
         this.end = Object.assign({}, end);
     }
 
-    intersects(other: Line): boolean {
-        return overlaps(this.boundingRect(), other.boundingRect())
-            && this.touchesOrCrossesLine(other)
-            && other.touchesOrCrossesLine(this);
+    gradient(): number | undefined {
+        if (this.start.x === this.end.x)
+            return undefined;
+        return (this.end.y - this.start.y) / (this.end.x - this.start.x);
+    }
+
+    intersects(other: LineSegment): Point | null {
+        if (!overlaps(this.boundingRect(), other.boundingRect()))
+            return null;
+
+        if (!this.touchesOrCrossesLine(other) || !other.touchesOrCrossesLine(this))
+            return null;
+
+        return Object.assign({}, this.intersection(other));
+    }
+
+    // should only be called if it's known that the lines overlap
+    intersection(other: LineSegment): Point {
+        if (other.pointOnLine(this.start))
+            return this.start;
+
+        const ma = this.gradient();
+        const mb = other.gradient();
+        if (ma === mb) {
+            // slope is the same, so lines must be overlapping
+            // TODO: get the closest point to a.start
+            console.log(ma, mb);
+            return this.start;
+        } else if (ma === undefined) {
+            // a is vertical
+            const t = other.start.y - mb! * other.start.x;
+            return { x: this.start.x, y: this.start.x * mb! + t };
+        } else if (mb === undefined) {
+            // b is vertical
+            const t = other.start.y - mb! * other.start.x;
+            return { x: this.start.x, y: this.start.x * mb! + t };
+        }
+
+        const ta = this.start.y - ma * this.start.x;
+        const tb = other.start.y - mb * other.start.x;
+        const x = (tb - ta) / (ma - mb);
+        return { x: x, y: ma * x + ta };
     }
 
     boundingRect(): Rect {
@@ -51,14 +89,14 @@ class Line {
         return crossProduct(diffLine.end, relPoint) > 0;
     }
 
-    touchesOrCrossesLine(other: Line): boolean {
+    touchesOrCrossesLine(other: LineSegment): boolean {
         return this.pointOnLine(other.start)
             || this.pointOnLine(other.end)
             || (this.pointRightOfLine(other.start) != this.pointRightOfLine(other.end));
     }
 
-    difference(): Line {
-        return new Line({ x: 0, y: 0 }, { x: this.end.x - this.start.x, y: this.end.y - this.start.y });
+    difference(): LineSegment {
+        return new LineSegment({ x: 0, y: 0 }, { x: this.end.x - this.start.x, y: this.end.y - this.start.y });
     }
 }
 
@@ -71,7 +109,7 @@ class RevArray<T> extends Array<T> {
 
 class Eye {
     pos: Point = { x: 0, y: 0 };
-    rays?: Array<Line>;
+    rays?: Array<LineSegment>;
 
     constructor(p: Point) {
         this.pos = Object.assign({}, p);
@@ -92,10 +130,10 @@ class Eye {
         this.rays = [];
         for (const wall of walls) {
             for (const corner of wall.corners()) {
-                const ray = new Line(this.pos, corner);
+                const ray = new LineSegment(this.pos, corner);
                 let shouldAdd = true;
                 for (const wall2 of walls) {
-                    if (wall2.intersects(ray)) {
+                    if (wall2.intersects(ray) != null) {
                         shouldAdd = false;
                         break;
                     }
@@ -105,7 +143,6 @@ class Eye {
             }
         }
     }
-
 }
 
 abstract class Tool {
@@ -175,7 +212,7 @@ class AddTool extends Tool {
     onPointerMove(_ev: PointerEvent, p: Point) {
         this.phantomWall ??= new EditableWall({ w: GRID_STEP, h: GRID_STEP });
         const start = this.dragStart ?? snap(p);
-        this.phantomWall.rect = new Line(start, snap(p)).boundingRect();
+        this.phantomWall.rect = new LineSegment(start, snap(p)).boundingRect();
         this.phantomWall.rect.w += GRID_STEP;
         this.phantomWall.rect.h += GRID_STEP;
     }
@@ -365,14 +402,23 @@ class EditableWall {
         yield { x: this.right, y: this.bottom };
     }
 
-    intersects(other: Line): boolean {
-        const lines = [
-            new Line({ x: this.left, y: this.top }, { x: this.right, y: this.top }),       // top
-            new Line({ x: this.left, y: this.top }, { x: this.left, y: this.bottom }),     // left
-            new Line({ x: this.left, y: this.bottom }, { x: this.right, y: this.bottom }), // bottom
-            new Line({ x: this.right, y: this.top }, { x: this.right, y: this.bottom }),   // right
-        ];
-        return lines.some(line => line.intersects(other));
+    intersects(line: LineSegment): Point | null {
+        const lines: Array<LineSegment> = [];
+        if (this.left > line.start.x)
+            lines.push(new LineSegment({ x: this.left, y: this.top }, { x: this.left, y: this.bottom }))     // left
+        else if (this.right < line.start.x)
+            lines.push(new LineSegment({ x: this.right, y: this.top }, { x: this.right, y: this.bottom }))   // right
+
+        if (this.top > line.start.y)
+            lines.push(new LineSegment({ x: this.left, y: this.top }, { x: this.right, y: this.top }))       // top
+        else if (this.bottom < line.start.y)
+            lines.push(new LineSegment({ x: this.left, y: this.bottom }, { x: this.right, y: this.bottom })) // bottom
+
+        for (const rectSide of lines) {
+            const p = rectSide.intersects(line);
+            if (p !== null) return p;
+        }
+        return null;
     }
 
     draw(canvas: Canvas) {
