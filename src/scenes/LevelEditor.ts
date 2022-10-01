@@ -25,7 +25,7 @@ interface Shape extends Draggable {
     colour: string;
     border: string;
 
-    corners: Array<Point>;
+    cornersForPoint(p: Point): Point[];
     draw(canvas: Canvas): void;
 }
 
@@ -124,7 +124,7 @@ class RevArray<T> extends Array<T> {
 
 class Eye implements Draggable {
     pos: Point = { x: 0, y: 0 };
-    rays?: Array<LineSegment>;
+    rays?: LineSegment[];
 
     constructor(p: Point) {
         this.pos = Object.assign({}, p);
@@ -137,21 +137,21 @@ class Eye implements Draggable {
         return (p.x - this.pos.x) ** 2 + (p.y - this.pos.y) ** 2 < EYE_RADIUS ** 2;
     }
 
-    draw(canvas: Canvas, walls: Array<Shape>, colour = '#000', lineWidth = 1) {
+    draw(canvas: Canvas, shapes: Shape[], colour = '#000', lineWidth = 1) {
         canvas.ctx.strokeStyle = colour;
         canvas.ctx.lineWidth = lineWidth;
 
         if (this.rays === undefined)
-            this.castRays(walls);
+            this.castRays(shapes);
 
         for (const ray of this.rays!)
             canvas.drawLine(ray.start, ray.end);
     }
 
-    castRays(walls: Array<Shape>) {
+    castRays(shapes: Shape[]) {
         this.rays = [];
-        for (const wall of walls)
-            for (const corner of wall.corners)
+        for (const wall of shapes)
+            for (const corner of wall.cornersForPoint(this.pos))
                 this.rays.push(new LineSegment(this.pos, corner));
     }
 }
@@ -364,7 +364,7 @@ class EyeTool extends Tool {
 
 export default class LevelEditor extends Scene {
     shapes: RevArray<Shape> = new RevArray<Shape>();
-    eyes: Array<Eye> = [];
+    eyes: Eye[] = [];
     buttonBar = new ButtonBar();
     activeTool: Tool = new BoxTool(this);
 
@@ -436,7 +436,7 @@ export default class LevelEditor extends Scene {
 }
 
 class Polygon implements Shape {
-    corners: Array<Point>;
+    corners: Point[];
     colour = '#ccf';
     border = '#337';
 
@@ -453,7 +453,34 @@ class Polygon implements Shape {
         }
     }
 
-    boundingBox(): Rect {
+    cornersForPoint(p: Point): Point[] {
+        if (this.contains(p))
+            return [];
+
+        const edges = [...this.lines()].map(([a, b]) => new LineSegment(a, b));
+        const corners: Point[] = [];
+        for (const corner of this.corners) {
+            const lineSeg = new LineSegment(p, corner);
+            let intersects = false;
+            for (const edge of edges) {
+                if (edge.start.x === corner.x && edge.start.y === corner.y)
+                    continue;
+                if (edge.end.x === corner.x && edge.end.y === corner.y)
+                    continue;
+
+                if (lineSeg.intersects(edge)) {
+                    intersects = true;
+                    break;
+                }
+            }
+            if (!intersects)
+                corners.push(corner);
+        }
+
+        return corners;
+    }
+
+    boundingRect(): Rect {
         const topLeft = { x: 9999999, y: 9999999 };
         const bottomRight = { x: -1, y: -1 };
         for (let corner of this.corners) {
@@ -486,12 +513,15 @@ class Polygon implements Shape {
         }
     }
 
+    *lines(): IterableIterator<[Point, Point]> {
+        for (let i = 0, j = this.corners.length - 1; i < this.corners.length; j = i++)
+            yield [this.corners[i], this.corners[j]];
+    }
+
     contains(p: Point): boolean {
         // https://wrfranklin.org/Research/Short_Notes/pnpoly.html
         let inside = false;
-        for (let i = 0, j = this.corners.length - 1; i < this.corners.length; j = i++) {
-            const a = this.corners[i];
-            const b = this.corners[j];
+        for (let [a, b] of this.lines()) {
             const intersects =
                 ((a.y > p.y) != (b.y > p.y))
                 && (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x);
@@ -522,17 +552,32 @@ class Box implements Shape {
         this.rect.y = p.y;
     }
 
-    public get corners(): Array<Point> {
-        return [
-            { x: this.left, y: this.top },
-            { x: this.left, y: this.bottom },
-            { x: this.right, y: this.top },
-            { x: this.right, y: this.bottom }
-        ];
+    cornersForPoint(p: Point): Point[] {
+        const topLeft = { x: this.left, y: this.top };
+        const bottomLeft = { x: this.left, y: this.bottom };
+        const topRight = { x: this.right, y: this.top };
+        const bottomRight = { x: this.right, y: this.bottom };
+
+        const corners = new Set<Point>();
+        if (p.x < this.left) {
+            corners.add(topLeft);
+            corners.add(bottomLeft);
+        } else if (p.x > this.right) {
+            corners.add(topRight);
+            corners.add(bottomRight);
+        }
+        if (p.y < this.top) {
+            corners.add(topLeft);
+            corners.add(topRight);
+        } else if (p.y > this.bottom) {
+            corners.add(bottomLeft);
+            corners.add(bottomRight);
+        }
+        return [...corners.values()];
     }
 
     intersects(line: LineSegment): Point | null {
-        const lines: Array<LineSegment> = [];
+        const lines: LineSegment[] = [];
         if (this.left > line.start.x)
             lines.push(new LineSegment({ x: this.left, y: this.top }, { x: this.left, y: this.bottom }));     // left
         else if (this.right < line.start.x)
@@ -575,8 +620,18 @@ class Circle implements Shape {
         this.origin = Object.assign({}, origin);
     }
 
-    public get corners(): Array<Point> {
-        return [];
+    cornersForPoint(p: Point): Point[] {
+        const diff = { x: p.x - this.origin.x, y: p.y - this.origin.y };
+        const length = Math.sqrt(diff.x ** 2 + diff.y ** 2);
+
+        if (length <= this.radius) return []
+        const th = Math.acos(this.radius / length);
+        const d = Math.atan2(diff.y, diff.x);
+
+        return [
+            { x: this.origin.x + Math.cos(d + th) * this.radius, y: this.origin.y + Math.sin(d + th) * this.radius },
+            { x: this.origin.x + Math.cos(d - th) * this.radius, y: this.origin.y + Math.sin(d - th) * this.radius },
+        ];
     }
 
     contains(p: Point): boolean {
