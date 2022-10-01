@@ -36,8 +36,6 @@ export default class Canvas {
     public set fontFace(fontFace: string) { this.#fontFace = fontFace; this.#updateFont(); }
     public get fontSize(): number { return this.#fontSize; }
 
-    readonly width: number;
-    readonly height: number;
     size: Size;
     public get rect(): Rect { return { x: 0, y: 0, w: this.size.w, h: this.size.h }; }
 
@@ -46,15 +44,13 @@ export default class Canvas {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d')!;
 
-        this.width = width;
-        this.height = height;
         this.size = { w: width, h: height };
 
         this.ctx.imageSmoothingEnabled = true;
         this.ctx.imageSmoothingQuality = "high";
     }
 
-    createChild(size: Size = { w: this.width, h: this.height }): Canvas {
+    createChild(size: Size = { w: this.size.w, h: this.size.h }): Canvas {
         const canvas = new Canvas(document.createElement('canvas'), size.w, size.h);
         canvas.canvas.width = size.w;
         canvas.canvas.height = size.h;

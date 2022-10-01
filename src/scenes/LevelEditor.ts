@@ -298,12 +298,12 @@ export default class LevelEditor extends Scene {
 
     drawGrid() {
         this.canvas.ctx.strokeStyle = '#aaa';
-        for (let i = GRID_STEP; i < Math.max(this.canvas.width, this.canvas.height); i += GRID_STEP) {
+        for (let i = GRID_STEP; i < Math.max(this.canvas.size.w, this.canvas.size.h); i += GRID_STEP) {
             this.canvas.ctx.lineWidth = (i % (GRID_STEP * 10) === 0) ? 2 : 1;
-            if (i < this.canvas.width)
-                this.canvas.drawLine({ x: i, y: 0 }, { x: i, y: this.canvas.height });
-            if (i < this.canvas.height)
-                this.canvas.drawLine({ x: 0, y: i }, { x: this.canvas.width, y: i });
+            if (i < this.canvas.size.w)
+                this.canvas.drawLine({ x: i, y: 0 }, { x: i, y: this.canvas.size.h });
+            if (i < this.canvas.size.h)
+                this.canvas.drawLine({ x: 0, y: i }, { x: this.canvas.size.w, y: i });
         }
     }
 
@@ -350,6 +350,11 @@ export default class LevelEditor extends Scene {
     onWallsUpdated() {
         for (const eye of this.eyes)
             eye.rays = undefined;
+    }
+
+    onKeyDown(ev: KeyboardEvent): void {
+        if (ev.key === 'Escape')
+            this.buttonBar.activeButtonIdx = 0;
     }
 }
 
@@ -440,18 +445,13 @@ class ButtonBar {
     public get activeButtonIdx(): number { return this.#activeButtonIdx; }
     public set activeButtonIdx(newButtonIdx: number) {
         this.buttons[this.activeButtonIdx][0].pressed = false;
+        this.buttons[newButtonIdx][0].onclick();
         this.buttons[newButtonIdx][0].pressed = true;
         this.#activeButtonIdx = newButtonIdx;
     }
 
     addButton(name: string, caption: string, action: () => void, latching = true) {
-        const button = new Button(
-            { x: 0, y: this.buttons.length * this.buttonSize.h, ...this.buttonSize },
-            name,
-            caption,
-            action
-        );
-
+        const button = new Button({ x: 0, y: this.buttons.length * this.buttonSize.h, ...this.buttonSize }, name, caption, action);
         if (this.activeButtonIdx === this.buttons.length)
             button.pressed = true;
 
@@ -466,9 +466,11 @@ class ButtonBar {
     onPointerUp(p: Point): boolean {
         for (let [i, [button, latching]] of this.buttons.entries()) {
             if (contains(button.rect, p)) {
-                button.onclick();
                 if (latching)
                     this.activeButtonIdx = i;
+                else
+                    button.onclick();
+
                 return true;
             }
         }
