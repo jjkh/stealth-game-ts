@@ -15,10 +15,20 @@ const overlaps = (a: Rect, b: Rect) =>
     && (a.y + a.h) > b.y;
 const crossProduct = (a: Point, b: Point) => a.x * b.y - b.x * a.y;
 const circleContains = (centre: Point, radius: number, p: Point) => (p.x - centre.x) ** 2 + (p.y - centre.y) ** 2 < radius ** 2;
+const unitVector = (o: Point, p: Point) => {
+    const diff = { x: p.x - o.x, y: p.y - o.y };
+    const len = Math.hypot(diff.x, diff.y);
+    if (len === 0)
+        return undefined;
+
+    return { x: diff.x / len, y: diff.y / len };
+};
 
 interface Draggable {
     origin: Point;
     contains(p: Point): boolean;
+
+    readonly snap: boolean;
 }
 
 interface Shape extends Draggable {
@@ -123,11 +133,18 @@ class RevArray<T> extends Array<T> {
 }
 
 class Eye implements Draggable {
-    pos: Point = { x: 0, y: 0 };
+    pos: Point;
+    angle = 0;
+    readonly snap = false;
+
+    fov = Math.PI / 2;
+    dist = 300;
+
     rays?: LineSegment[];
 
     constructor(p: Point) {
         this.pos = Object.assign({}, p);
+        this.angle = 0;
     }
 
     public get origin(): Point { return this.pos; }
@@ -135,6 +152,14 @@ class Eye implements Draggable {
 
     contains(p: Point): boolean {
         return (p.x - this.pos.x) ** 2 + (p.y - this.pos.y) ** 2 < EYE_RADIUS ** 2;
+    }
+
+    lookAt(p: Point) {
+        const vec = unitVector(this.pos, p);
+        if (vec === undefined)
+            return;
+
+        this.angle = Math.atan2(vec.y, vec.x);
     }
 
     draw(canvas: Canvas, shapes: Shape[], colour = '#000', lineWidth = 1) {
@@ -146,13 +171,33 @@ class Eye implements Draggable {
 
         for (const ray of this.rays!)
             canvas.drawLine(ray.start, ray.end);
+
+        canvas.ctx.globalAlpha = 0.1;
+        canvas.ctx.beginPath();
+        canvas.ctx.moveTo(this.pos.x, this.pos.y);
+        canvas.ctx.arc(this.pos.x, this.pos.y, this.dist, this.angle - this.fov / 2, this.angle + this.fov / 2);
+        canvas.ctx.fillStyle = colour;
+        canvas.ctx.fill();
+        canvas.ctx.globalAlpha = 1;
     }
 
     castRays(shapes: Shape[]) {
+
         this.rays = [];
         for (const wall of shapes)
-            for (const corner of wall.cornersForPoint(this.pos))
+            for (const corner of wall.cornersForPoint(this.pos)) {
+                const length = Math.hypot(corner.x - this.pos.x, corner.y - this.pos.y);
+                if (length > this.dist || length === 0)
+                    continue;
+
+                const vec = unitVector(this.pos, corner)!;
+                const angle = Math.atan2(vec.y, vec.x);
+
+                if ((angle < (this.angle - this.fov / 2) % (Math.PI * 2))
+                    || (angle > (this.angle + this.fov / 2) % (Math.PI * 2)))
+                    continue;
                 this.rays.push(new LineSegment(this.pos, corner));
+            }
     }
 }
 
@@ -178,8 +223,9 @@ class HandTool extends Tool {
 
     onPointerMove(_ev: PointerEvent, p: Point) {
         if (this.dragStart) {
+            if (!this.dragging) return;
             const newPos = { x: p.x - this.dragStart.x, y: p.y - this.dragStart.y };
-            this.dragging!.origin = snapTopLeft(newPos);
+            this.dragging.origin = this.dragging.snap ? snapTopLeft(newPos) : newPos;
             this.editor.onShapesUpdated();
         }
     }
@@ -296,7 +342,7 @@ class CircleTool extends Tool {
 
         const newPoint = snapCentre(p);
         const length = Math.max(1, Math.sqrt((newPoint.x - this.phantomCircle.origin.x) ** 2 + (newPoint.y - this.phantomCircle.origin.y) ** 2));
-        this.phantomCircle.radius = length
+        this.phantomCircle.radius = length;
     }
 
     onPointerUp() {
@@ -439,6 +485,7 @@ class Polygon implements Shape {
     corners: Point[];
     colour = '#ccf';
     border = '#337';
+    readonly snap = true;
 
     constructor(startingPoint: Point) {
         this.corners = [Object.assign({}, startingPoint)];
@@ -536,6 +583,7 @@ class Box implements Shape {
     rect: Rect;
     colour: string = '#cfc';
     border: string = '#373';
+    readonly snap = true;
 
     public get top(): number { return this.rect.y; };
     public get left(): number { return this.rect.x; };
@@ -612,6 +660,7 @@ class Box implements Shape {
 class Circle implements Shape {
     colour: string = '#fcc';
     border: string = '#f33';
+    readonly snap = true;
 
     radius = 1;
     origin: Point;
@@ -624,7 +673,7 @@ class Circle implements Shape {
         const diff = { x: p.x - this.origin.x, y: p.y - this.origin.y };
         const length = Math.sqrt(diff.x ** 2 + diff.y ** 2);
 
-        if (length <= this.radius) return []
+        if (length <= this.radius) return [];
         const th = Math.acos(this.radius / length);
         const d = Math.atan2(diff.y, diff.x);
 
