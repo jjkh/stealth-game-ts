@@ -476,9 +476,9 @@ class Polygon implements Shape {
     contains(p: Point): boolean {
         // https://wrfranklin.org/Research/Short_Notes/pnpoly.html
         let inside = false;
-        for (let i = 0; i < this.corners.length - 1; i++) {
+        for (let i = 0, j = this.corners.length - 1; i < this.corners.length; j = i++) {
             const a = this.corners[i];
-            const b = this.corners[i + 1];
+            const b = this.corners[j];
             const intersects =
                 ((a.y > p.y) != (b.y > p.y))
                 && (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x);
