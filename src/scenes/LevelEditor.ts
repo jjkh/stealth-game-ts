@@ -49,7 +49,7 @@ class LineSegment {
         if (ma === mb) {
             // slope is the same, so lines must be overlapping
             // TODO: get the closest point to a.start
-            console.log(ma, mb);
+            console.log('TODO: same slope, overlapping lines', ma, mb);
             return this.start;
         } else if (ma === undefined) {
             // a is vertical
@@ -283,37 +283,17 @@ class EyeTool extends Tool {
 export default class LevelEditor extends Scene {
     walls: RevArray<EditableWall> = new RevArray<EditableWall>();
     eyes: Array<Eye> = [];
-    buttons = [
-        new Button(
-            { x: 0, y: 0, w: 40, h: 40 },
-            '🖐',
-            'drag wall/eye to move',
-            () => { this.activeTool = new HandTool(this); this.buttons.map((b, i) => b.pressed = i === 0); }
-        ),
-        new Button(
-            { x: 0, y: 40, w: 40, h: 40 },
-            '➕',
-            'click to add wall',
-            () => { this.activeTool = new AddTool(this); this.buttons.map((b, i) => b.pressed = i === 1); }
-        ),
-        new Button(
-            { x: 0, y: 80, w: 40, h: 40 },
-            '➖',
-            'click to remove wall or eye',
-            () => { this.activeTool = new RemoveTool(this); this.buttons.map((b, i) => b.pressed = i === 2); }
-        ),
-        new Button(
-            { x: 0, y: 120, w: 40, h: 40 },
-            '👁',
-            'cast rays',
-            () => { this.activeTool = new EyeTool(this); this.buttons.map((b, i) => b.pressed = i === 3); }
-        ),
-    ];
+    buttonBar = new ButtonBar();
     activeTool: HandTool | AddTool | RemoveTool | EyeTool = new AddTool(this);
 
     constructor(canvas: Canvas) {
         super(canvas);
-        this.buttons[1].pressed = true;
+
+        this.buttonBar.addButton('🖐', 'drag wall/eye to move', () => this.activeTool = new HandTool(this));
+        this.buttonBar.addButton('➕', 'click to add wall', () => this.activeTool = new AddTool(this));
+        this.buttonBar.addButton('➖', 'click to remove wall or eye', () => this.activeTool = new RemoveTool(this));
+        this.buttonBar.addButton('👁', 'cast rays', () => this.activeTool = new EyeTool(this));
+        this.buttonBar.activeButtonIdx = 1;
     }
 
     drawGrid() {
@@ -348,18 +328,12 @@ export default class LevelEditor extends Scene {
         }
 
         this.activeTool.draw?.(this.canvas);
-
-        for (let button of this.buttons)
-            button.draw(this.canvas);
+        this.buttonBar.draw(this.canvas);
     }
 
     onPointerUp(ev: PointerEvent, p: Point) {
-        for (let button of this.buttons) {
-            if (contains(button.rect, p)) {
-                button.onclick();
-                return;
-            }
-        }
+        if (this.buttonBar.onPointerUp(p))
+            return;
 
         this.activeTool.onPointerUp?.(ev, p);
     }
@@ -369,9 +343,7 @@ export default class LevelEditor extends Scene {
     }
 
     onPointerMove(ev: PointerEvent, p: Point) {
-        for (const button of this.buttons)
-            button.hovered = contains(button.rect, p);
-
+        this.buttonBar.onPointerMove(p);
         this.activeTool.onPointerMove?.(ev, p);
     }
 
@@ -405,14 +377,14 @@ class EditableWall {
     intersects(line: LineSegment): Point | null {
         const lines: Array<LineSegment> = [];
         if (this.left > line.start.x)
-            lines.push(new LineSegment({ x: this.left, y: this.top }, { x: this.left, y: this.bottom }))     // left
+            lines.push(new LineSegment({ x: this.left, y: this.top }, { x: this.left, y: this.bottom }));     // left
         else if (this.right < line.start.x)
-            lines.push(new LineSegment({ x: this.right, y: this.top }, { x: this.right, y: this.bottom }))   // right
+            lines.push(new LineSegment({ x: this.right, y: this.top }, { x: this.right, y: this.bottom }));   // right
 
         if (this.top > line.start.y)
-            lines.push(new LineSegment({ x: this.left, y: this.top }, { x: this.right, y: this.top }))       // top
+            lines.push(new LineSegment({ x: this.left, y: this.top }, { x: this.right, y: this.top }));       // top
         else if (this.bottom < line.start.y)
-            lines.push(new LineSegment({ x: this.left, y: this.bottom }, { x: this.right, y: this.bottom })) // bottom
+            lines.push(new LineSegment({ x: this.left, y: this.bottom }, { x: this.right, y: this.bottom })); // bottom
 
         for (const rectSide of lines) {
             const p = rectSide.intersects(line);
@@ -457,5 +429,54 @@ class Button {
         canvas.ctx.strokeStyle = '#999';
         canvas.ctx.lineWidth = 1;
         canvas.strokeRect(grow(this.rect, -0.5));
+    }
+}
+
+class ButtonBar {
+    buttons: Array<[button: Button, latching: boolean]> = [];
+    readonly buttonSize = { w: 40, h: 40 };
+
+    #activeButtonIdx = 0;
+    public get activeButtonIdx(): number { return this.#activeButtonIdx; }
+    public set activeButtonIdx(newButtonIdx: number) {
+        this.buttons[this.activeButtonIdx][0].pressed = false;
+        this.buttons[newButtonIdx][0].pressed = true;
+        this.#activeButtonIdx = newButtonIdx;
+    }
+
+    addButton(name: string, caption: string, action: () => void, latching = true) {
+        const button = new Button(
+            { x: 0, y: this.buttons.length * this.buttonSize.h, ...this.buttonSize },
+            name,
+            caption,
+            action
+        );
+
+        if (this.activeButtonIdx === this.buttons.length)
+            button.pressed = true;
+
+        this.buttons.push([button, latching]);
+    }
+
+    draw(canvas: Canvas) {
+        for (let [button, _] of this.buttons)
+            button.draw(canvas);
+    }
+
+    onPointerUp(p: Point): boolean {
+        for (let [i, [button, latching]] of this.buttons.entries()) {
+            if (contains(button.rect, p)) {
+                button.onclick();
+                if (latching)
+                    this.activeButtonIdx = i;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    onPointerMove(p: Point) {
+        for (let [button, _] of this.buttons)
+            button.hovered = contains(button.rect, p);
     }
 }
