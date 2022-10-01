@@ -258,19 +258,19 @@ class PolygonTool extends Tool {
             this.phantomPolygon = new Polygon(snapCentre(p));
     }
 
-    onPointerUp(p: Point) {
+    onPointerUp(_ev: PointerEvent, p: Point) {
         if (!this.phantomPolygon)
             return;
 
         const newPoint = snapCentre(p);
-        if (this.phantomPolygon.corners.slice(0, -1).some(p => p.x == newPoint.x && p.y == newPoint.y)) {
+        if (this.phantomPolygon.corners.slice(0, -1).some(p => p.x === newPoint.x && p.y === newPoint.y)) {
             if (this.phantomPolygon.corners.length > 1) {
                 this.editor.shapes.push(this.phantomPolygon);
                 this.editor.onShapesUpdated();
             }
             this.phantomPolygon = undefined;
         } else {
-            this.phantomPolygon.corners.push(snapCentre(p));
+            this.phantomPolygon.corners.push(newPoint);
         }
     }
 
@@ -451,6 +451,19 @@ class Polygon implements Shape {
             corner.x += diff.x;
             corner.y += diff.y;
         }
+    }
+
+    boundingBox(): Rect {
+        const topLeft = { x: 9999999, y: 9999999 };
+        const bottomRight = { x: -1, y: -1 };
+        for (let corner of this.corners) {
+            topLeft.x = Math.min(topLeft.x, corner.x);
+            topLeft.y = Math.min(topLeft.y, corner.y);
+            bottomRight.x = Math.max(bottomRight.x, corner.x);
+            bottomRight.y = Math.max(bottomRight.y, corner.y);
+        }
+
+        return { x: topLeft.x, y: topLeft.y, w: bottomRight.x - topLeft.x, h: bottomRight.y - topLeft.y };
     }
 
     draw(canvas: Canvas) {
