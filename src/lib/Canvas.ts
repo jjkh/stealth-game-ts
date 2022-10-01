@@ -128,6 +128,12 @@ export default class Canvas {
         this.ctx.fill();
     }
 
+    strokeCircle(point: Point, radius: number) {
+        this.ctx.beginPath();
+        this.ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+        this.ctx.stroke();
+    }
+
     drawImage(image: ImageBitmap, rect: Rect, mode: ImageScaleType = 'stretch') {
         this.ctx.save();
         const imageRatio = image.width / image.height;

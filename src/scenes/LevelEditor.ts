@@ -1,3 +1,4 @@
+import ButtonBar from "../lib/ButtonBar";
 import Canvas, { contains, Point, Rect } from "../lib/Canvas";
 import Scene from "../lib/Scene";
 
@@ -5,7 +6,8 @@ const GRID_STEP = 16;
 const EYE_RADIUS = 6;
 
 const grow = (r: Rect, s: number) => { return { x: r.x - s / 2, y: r.y - s / 2, w: r.w + s, h: r.h + s }; };
-const snap = (p: Point) => { return { x: Math.floor(p.x / GRID_STEP) * GRID_STEP, y: Math.floor(p.y / GRID_STEP) * GRID_STEP }; };
+const snapTopLeft = (p: Point) => { return { x: Math.floor(p.x / GRID_STEP) * GRID_STEP, y: Math.floor(p.y / GRID_STEP) * GRID_STEP }; };
+const snapCentre = (p: Point) => { return { x: Math.round(p.x / GRID_STEP) * GRID_STEP, y: Math.round(p.y / GRID_STEP) * GRID_STEP }; };
 const overlaps = (a: Rect, b: Rect) =>
     a.x < (b.x + b.w)
     && (a.x + a.w) > b.x
@@ -13,6 +15,19 @@ const overlaps = (a: Rect, b: Rect) =>
     && (a.y + a.h) > b.y;
 const crossProduct = (a: Point, b: Point) => a.x * b.y - b.x * a.y;
 const circleContains = (centre: Point, radius: number, p: Point) => (p.x - centre.x) ** 2 + (p.y - centre.y) ** 2 < radius ** 2;
+
+interface Draggable {
+    origin: Point;
+    contains(p: Point): boolean;
+}
+
+interface Shape extends Draggable {
+    colour: string;
+    border: string;
+
+    corners: Array<Point>;
+    draw(canvas: Canvas): void;
+}
 
 class LineSegment {
     start: Point;
@@ -107,7 +122,7 @@ class RevArray<T> extends Array<T> {
     }
 }
 
-class Eye {
+class Eye implements Draggable {
     pos: Point = { x: 0, y: 0 };
     rays?: Array<LineSegment>;
 
@@ -115,7 +130,14 @@ class Eye {
         this.pos = Object.assign({}, p);
     }
 
-    draw(canvas: Canvas, walls: Array<EditableWall>, colour = '#000', lineWidth = 1) {
+    public get origin(): Point { return this.pos; }
+    public set origin(p: Point) { this.pos = p; }
+
+    contains(p: Point): boolean {
+        return (p.x - this.pos.x) ** 2 + (p.y - this.pos.y) ** 2 < EYE_RADIUS ** 2;
+    }
+
+    draw(canvas: Canvas, walls: Array<Shape>, colour = '#000', lineWidth = 1) {
         canvas.ctx.strokeStyle = colour;
         canvas.ctx.lineWidth = lineWidth;
 
@@ -126,22 +148,11 @@ class Eye {
             canvas.drawLine(ray.start, ray.end);
     }
 
-    castRays(walls: Array<EditableWall>) {
+    castRays(walls: Array<Shape>) {
         this.rays = [];
-        for (const wall of walls) {
-            for (const corner of wall.corners()) {
-                const ray = new LineSegment(this.pos, corner);
-                let shouldAdd = true;
-                for (const wall2 of walls) {
-                    if (wall2.intersects(ray) != null) {
-                        shouldAdd = false;
-                        break;
-                    }
-                }
-                if (shouldAdd)
-                    this.rays.push(ray);
-            }
-        }
+        for (const wall of walls)
+            for (const corner of wall.corners)
+                this.rays.push(new LineSegment(this.pos, corner));
     }
 }
 
@@ -162,19 +173,14 @@ abstract class Tool {
 
 class HandTool extends Tool {
     readonly kind = 'hand';
-    dragging?: EditableWall | Eye | undefined;
+    dragging?: Draggable;
     dragStart?: Point;
 
     onPointerMove(_ev: PointerEvent, p: Point) {
         if (this.dragStart) {
             const newPos = { x: p.x - this.dragStart.x, y: p.y - this.dragStart.y };
-            if (this.dragging instanceof EditableWall) {
-                Object.assign(this.dragging.rect, snap(newPos));
-                this.editor.onWallsUpdated();
-            } else if (this.dragging instanceof Eye) {
-                this.dragging.pos = newPos;
-                this.dragging.rays = undefined;
-            }
+            this.dragging!.origin = snapTopLeft(newPos);
+            this.editor.onShapesUpdated();
         }
     }
 
@@ -187,55 +193,131 @@ class HandTool extends Tool {
         if (this.dragging) return;
 
         for (const [_, eye] of this.editor.eyes.entries()) {
-            if (circleContains(eye.pos, EYE_RADIUS, p)) {
+            if (eye.contains(p)) {
                 this.dragging = eye;
                 this.dragStart = { x: p.x - eye.pos.x, y: p.y - eye.pos.y };
                 return;
             }
         }
 
-        for (const [_, wall] of this.editor.walls.revEntries()) {
-            if (contains(wall.rect, p)) {
-                this.dragging = wall;
-                this.dragStart = { x: p.x - wall.rect.x, y: p.y - wall.rect.y };
+        for (const [_, shape] of this.editor.shapes.revEntries()) {
+            if (shape.contains(p)) {
+                this.dragging = shape;
+                this.dragStart = { x: p.x - shape.origin.x, y: p.y - shape.origin.y };
                 return;
             }
         }
     }
 }
 
-class AddTool extends Tool {
+class BoxTool extends Tool {
     readonly kind = 'add';
-    phantomWall?: EditableWall | undefined;
+    phantomBox?: Box | undefined;
     dragStart?: Point;
 
     onPointerMove(_ev: PointerEvent, p: Point) {
-        this.phantomWall ??= new EditableWall({ w: GRID_STEP, h: GRID_STEP });
-        const start = this.dragStart ?? snap(p);
-        this.phantomWall.rect = new LineSegment(start, snap(p)).boundingRect();
-        this.phantomWall.rect.w += GRID_STEP;
-        this.phantomWall.rect.h += GRID_STEP;
+        this.phantomBox ??= new Box({ w: GRID_STEP, h: GRID_STEP });
+        const start = this.dragStart ?? snapTopLeft(p);
+        this.phantomBox.rect = new LineSegment(start, snapTopLeft(p)).boundingRect();
+        this.phantomBox.rect.w += GRID_STEP;
+        this.phantomBox.rect.h += GRID_STEP;
     }
 
     onPointerUp() {
-        if (this.phantomWall) {
-            this.editor.walls.push(this.phantomWall);
-            this.editor.onWallsUpdated();
+        if (this.phantomBox) {
+            this.editor.shapes.push(this.phantomBox);
+            this.editor.onShapesUpdated();
         }
-        this.phantomWall = undefined;
+        this.phantomBox = undefined;
         this.dragStart = undefined;
     }
 
     onPointerDown(ev: PointerEvent, p: Point) {
         if (this.dragStart) return;
-        this.dragStart = snap(p);
+        this.dragStart = snapTopLeft(p);
         this.onPointerMove(ev, p);
     }
 
     draw(canvas: Canvas): void {
-        if (this.phantomWall) {
+        if (this.phantomBox) {
             canvas.ctx.globalAlpha = 0.6;
-            this.phantomWall.draw(canvas);
+            this.phantomBox.draw(canvas);
+            canvas.ctx.globalAlpha = 1;
+        }
+    }
+}
+
+class PolygonTool extends Tool {
+    readonly kind = 'polygon';
+    phantomPolygon?: Polygon | undefined;
+
+    onPointerMove(_ev: PointerEvent, p: Point) {
+        if (this.phantomPolygon)
+            this.phantomPolygon.corners[this.phantomPolygon.corners.length - 1] = snapCentre(p);
+        else
+            this.phantomPolygon = new Polygon(snapCentre(p));
+    }
+
+    onPointerUp(p: Point) {
+        if (!this.phantomPolygon)
+            return;
+
+        const newPoint = snapCentre(p);
+        if (this.phantomPolygon.corners.slice(0, -1).some(p => p.x == newPoint.x && p.y == newPoint.y)) {
+            if (this.phantomPolygon.corners.length > 1) {
+                this.editor.shapes.push(this.phantomPolygon);
+                this.editor.onShapesUpdated();
+            }
+            this.phantomPolygon = undefined;
+        } else {
+            this.phantomPolygon.corners.push(snapCentre(p));
+        }
+    }
+
+    draw(canvas: Canvas): void {
+        if (this.phantomPolygon) {
+            canvas.ctx.globalAlpha = 0.6;
+            this.phantomPolygon.draw(canvas);
+
+            for (const corner of this.phantomPolygon.corners)
+                canvas.fillCircle(corner, 4, this.phantomPolygon.border);
+            canvas.ctx.globalAlpha = 1;
+        }
+    }
+}
+
+class CircleTool extends Tool {
+    readonly kind = 'circle';
+    phantomCircle?: Circle | undefined;
+
+    onPointerMove(_ev: PointerEvent, p: Point) {
+        if (!this.phantomCircle)
+            return;
+
+        const newPoint = snapCentre(p);
+        const length = Math.max(1, Math.sqrt((newPoint.x - this.phantomCircle.origin.x) ** 2 + (newPoint.y - this.phantomCircle.origin.y) ** 2));
+        this.phantomCircle.radius = length
+    }
+
+    onPointerUp() {
+        if (this.phantomCircle) {
+            this.editor.shapes.push(this.phantomCircle);
+            this.editor.onShapesUpdated();
+        }
+        this.phantomCircle = undefined;
+    }
+
+    onPointerDown(_ev: PointerEvent, p: Point) {
+        if (this.phantomCircle)
+            return;
+
+        this.phantomCircle ??= new Circle(snapCentre(p));
+    }
+
+    draw(canvas: Canvas): void {
+        if (this.phantomCircle) {
+            canvas.ctx.globalAlpha = 0.6;
+            this.phantomCircle.draw(canvas);
             canvas.ctx.globalAlpha = 1;
         }
     }
@@ -252,10 +334,10 @@ class RemoveTool extends Tool {
             }
         }
 
-        for (const [i, wall] of this.editor.walls.revEntries()) {
-            if (contains(wall.rect, p)) {
-                this.editor.walls.splice(i, 1);
-                this.editor.onWallsUpdated();
+        for (const [i, shape] of this.editor.shapes.revEntries()) {
+            if (shape.contains(p)) {
+                this.editor.shapes.splice(i, 1);
+                this.editor.onShapesUpdated();
                 return;
             }
         }
@@ -267,7 +349,7 @@ class EyeTool extends Tool {
     activeEye?: Eye;
 
     draw(canvas: Canvas) {
-        this.activeEye?.draw(canvas, this.editor.walls, '#0b4161', 2);
+        this.activeEye?.draw(canvas, this.editor.shapes, '#0b4161', 2);
     }
 
     onPointerMove(_ev: PointerEvent, p: Point) {
@@ -281,16 +363,18 @@ class EyeTool extends Tool {
 }
 
 export default class LevelEditor extends Scene {
-    walls: RevArray<EditableWall> = new RevArray<EditableWall>();
+    shapes: RevArray<Shape> = new RevArray<Shape>();
     eyes: Array<Eye> = [];
     buttonBar = new ButtonBar();
-    activeTool: HandTool | AddTool | RemoveTool | EyeTool = new AddTool(this);
+    activeTool: Tool = new BoxTool(this);
 
     constructor(canvas: Canvas) {
         super(canvas);
 
         this.buttonBar.addButton('🖐', 'drag wall/eye to move', () => this.activeTool = new HandTool(this));
-        this.buttonBar.addButton('➕', 'click to add wall', () => this.activeTool = new AddTool(this));
+        this.buttonBar.addButton('⬛️', 'click to add box', () => this.activeTool = new BoxTool(this));
+        this.buttonBar.addButton('⚫️', 'click to add circle', () => this.activeTool = new CircleTool(this));
+        this.buttonBar.addButton('✏️', 'click to draw polygon, click existing point to finalise', () => this.activeTool = new PolygonTool(this));
         this.buttonBar.addButton('➖', 'click to remove wall or eye', () => this.activeTool = new RemoveTool(this));
         this.buttonBar.addButton('👁', 'cast rays', () => this.activeTool = new EyeTool(this));
         this.buttonBar.activeButtonIdx = 1;
@@ -311,19 +395,12 @@ export default class LevelEditor extends Scene {
         this.canvas.clear('#ccc');
         this.drawGrid();
 
-        for (const wall of this.walls) {
-            wall.draw(this.canvas);
-        }
-
-        // if phantom wall exists, draw it with 60% opacity
-        if (this.activeTool.kind === 'add' && this.activeTool.phantomWall) {
-            this.canvas.ctx.globalAlpha = 0.6;
-            this.activeTool.phantomWall.draw(this.canvas);
-            this.canvas.ctx.globalAlpha = 1;
+        for (const shape of this.shapes) {
+            shape.draw(this.canvas);
         }
 
         for (const eye of this.eyes) {
-            eye.draw(this.canvas, this.walls);
+            eye.draw(this.canvas, this.shapes);
             this.canvas.fillCircle(eye.pos, EYE_RADIUS, '#d66');
         }
 
@@ -347,7 +424,7 @@ export default class LevelEditor extends Scene {
         this.activeTool.onPointerMove?.(ev, p);
     }
 
-    onWallsUpdated() {
+    onShapesUpdated() {
         for (const eye of this.eyes)
             eye.rays = undefined;
     }
@@ -358,7 +435,61 @@ export default class LevelEditor extends Scene {
     }
 }
 
-class EditableWall {
+class Polygon implements Shape {
+    corners: Array<Point>;
+    colour = '#ccf';
+    border = '#337';
+
+    constructor(startingPoint: Point) {
+        this.corners = [Object.assign({}, startingPoint)];
+    }
+
+    public get origin(): Point { return this.corners[0]; }
+    public set origin(p: Point) {
+        const diff = { x: p.x - this.origin.x, y: p.y - this.origin.y };
+        for (const corner of this.corners) {
+            corner.x += diff.x;
+            corner.y += diff.y;
+        }
+    }
+
+    draw(canvas: Canvas) {
+        const cornerCount = this.corners.length;
+        if (cornerCount > 1) {
+            const firstCorner = this.corners[0];
+            canvas.ctx.beginPath();
+            canvas.ctx.moveTo(firstCorner.x, firstCorner.y);
+
+            for (const corner of this.corners.slice(1))
+                canvas.ctx.lineTo(corner.x, corner.y);
+            canvas.ctx.lineTo(firstCorner.x, firstCorner.y);
+
+            canvas.ctx.fillStyle = this.colour;
+            canvas.ctx.fill();
+
+            canvas.ctx.strokeStyle = this.border;
+            canvas.ctx.lineWidth = 2;
+            canvas.ctx.stroke();
+        }
+    }
+
+    contains(p: Point): boolean {
+        // https://wrfranklin.org/Research/Short_Notes/pnpoly.html
+        let inside = false;
+        for (let i = 0; i < this.corners.length - 1; i++) {
+            const a = this.corners[i];
+            const b = this.corners[i + 1];
+            const intersects =
+                ((a.y > p.y) != (b.y > p.y))
+                && (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x);
+            if (intersects) inside = !inside;
+        }
+        return inside;
+    }
+
+}
+
+class Box implements Shape {
     rect: Rect;
     colour: string = '#cfc';
     border: string = '#373';
@@ -372,11 +503,19 @@ class EditableWall {
         this.rect = Object.assign({ x: 0, y: 0, w: 1, h: 1 }, rect);
     }
 
-    *corners(): IterableIterator<Point> {
-        yield { x: this.left, y: this.top };
-        yield { x: this.left, y: this.bottom };
-        yield { x: this.right, y: this.top };
-        yield { x: this.right, y: this.bottom };
+    public get origin(): Point { return { x: this.left, y: this.top }; }
+    public set origin(p: Point) {
+        this.rect.x = p.x;
+        this.rect.y = p.y;
+    }
+
+    public get corners(): Array<Point> {
+        return [
+            { x: this.left, y: this.top },
+            { x: this.left, y: this.bottom },
+            { x: this.right, y: this.top },
+            { x: this.right, y: this.bottom }
+        ];
     }
 
     intersects(line: LineSegment): Point | null {
@@ -398,6 +537,10 @@ class EditableWall {
         return null;
     }
 
+    contains(p: Point): boolean {
+        return contains(this.rect, p);
+    }
+
     draw(canvas: Canvas) {
         canvas.fillRect(this.rect, this.colour);
 
@@ -407,78 +550,31 @@ class EditableWall {
     }
 }
 
-class Button {
-    rect: Rect;
-    text: string;
-    onclick: () => void;
-    hovered = false;
-    pressed = false;
-    hoverText: string;
 
-    constructor(rect: Rect, text: string, hoverText: string, onclick: () => void) {
-        this.rect = Object.assign({}, rect);
-        this.text = text;
-        this.hoverText = hoverText;
-        this.onclick = onclick;
+class Circle implements Shape {
+    colour: string = '#fcc';
+    border: string = '#f33';
+
+    radius = 1;
+    origin: Point;
+
+    constructor(origin: Point) {
+        this.origin = Object.assign({}, origin);
+    }
+
+    public get corners(): Array<Point> {
+        return [];
+    }
+
+    contains(p: Point): boolean {
+        return circleContains(this.origin, this.radius, p);
     }
 
     draw(canvas: Canvas) {
-        canvas.fillRect(this.rect, this.pressed ? '#ccc' : (this.hovered ? '#eee' : '#ddd'));
-        canvas.ctx.fillStyle = '#000';
-        canvas.fontSize = 24;
-        canvas.drawTextRect(this.text, this.rect);
-        if (this.hovered) {
-            canvas.fontSize = 18;
-            canvas.drawTextRect(this.hoverText, { x: this.rect.x + this.rect.w + 6, y: this.rect.y, w: 0, h: this.rect.h }, { vertical: 'middle', horizontal: 'left' });
-        }
-        canvas.ctx.strokeStyle = '#999';
-        canvas.ctx.lineWidth = 1;
-        canvas.strokeRect(grow(this.rect, -0.5));
-    }
-}
+        canvas.fillCircle(this.origin, this.radius, this.colour);
 
-class ButtonBar {
-    buttons: Array<[button: Button, latching: boolean]> = [];
-    readonly buttonSize = { w: 40, h: 40 };
-
-    #activeButtonIdx = 0;
-    public get activeButtonIdx(): number { return this.#activeButtonIdx; }
-    public set activeButtonIdx(newButtonIdx: number) {
-        this.buttons[this.activeButtonIdx][0].pressed = false;
-        this.buttons[newButtonIdx][0].onclick();
-        this.buttons[newButtonIdx][0].pressed = true;
-        this.#activeButtonIdx = newButtonIdx;
-    }
-
-    addButton(name: string, caption: string, action: () => void, latching = true) {
-        const button = new Button({ x: 0, y: this.buttons.length * this.buttonSize.h, ...this.buttonSize }, name, caption, action);
-        if (this.activeButtonIdx === this.buttons.length)
-            button.pressed = true;
-
-        this.buttons.push([button, latching]);
-    }
-
-    draw(canvas: Canvas) {
-        for (let [button, _] of this.buttons)
-            button.draw(canvas);
-    }
-
-    onPointerUp(p: Point): boolean {
-        for (let [i, [button, latching]] of this.buttons.entries()) {
-            if (contains(button.rect, p)) {
-                if (latching)
-                    this.activeButtonIdx = i;
-                else
-                    button.onclick();
-
-                return true;
-            }
-        }
-        return false;
-    }
-
-    onPointerMove(p: Point) {
-        for (let [button, _] of this.buttons)
-            button.hovered = contains(button.rect, p);
+        canvas.ctx.strokeStyle = this.border;
+        canvas.ctx.lineWidth = 2;
+        canvas.strokeCircle(this.origin, this.radius - 0.5);
     }
 }
