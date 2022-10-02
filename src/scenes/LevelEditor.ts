@@ -23,6 +23,7 @@ const unitVector = (o: Point, p: Point) => {
 
     return { x: diff.x / len, y: diff.y / len };
 };
+const vecLen = (a: Point, b: Point) => Math.hypot(b.x - a.x, b.y - a.y);
 
 interface Draggable {
     origin: Point;
@@ -163,6 +164,7 @@ class Eye implements Draggable {
             return;
 
         this.angle = Math.atan2(vec.y, vec.x);
+        this.rays = undefined;
     }
 
     draw(canvas: Canvas, shapes: Shape[], colour = '#000', lineWidth = 1) {
@@ -189,16 +191,16 @@ class Eye implements Draggable {
         for (const wall of shapes) {
             for (const corner of wall.cornersForPoint(this.pos)) {
                 const length = Math.hypot(corner.x - this.pos.x, corner.y - this.pos.y);
-                if (length > this.dist || length === 0)
+                if (length === 0 || length > this.dist)
                     continue;
 
                 const vec = unitVector(this.pos, corner)!;
                 const angle = Math.atan2(vec.y, vec.x);
+                let diff = angle - this.angle
+                diff += diff > Math.PI ? -2 * Math.PI : (diff < -Math.PI ? 2 * Math.PI : 0)
 
-                if ((angle < (this.angle - this.fov / 2) % (Math.PI * 2))
-                    || (angle > (this.angle + this.fov / 2) % (Math.PI * 2)))
-                    continue;
-                this.rays.push(new LineSegment(this.pos, corner));
+                if (diff < this.fov / 2 && diff > -this.fov / 2)
+                    this.rays.push(new LineSegment(this.pos, corner));
             }
         }
     }
@@ -413,19 +415,40 @@ class RemoveTool extends Tool {
 
 class EyeTool extends Tool {
     readonly kind = 'eye';
+    phantomEye: Eye = new Eye({ x: 0, y: 0 });
     activeEye?: Eye;
 
+    constructor(editor: LevelEditor) {
+        super(editor);
+        this.phantomEye.fov = 2 * Math.PI;
+    }
+
     draw(canvas: Canvas) {
-        this.activeEye?.draw(canvas, this.editor.shapes, '#0b4161', 2);
+        if (this.activeEye)
+            this.activeEye.draw(canvas, this.editor.shapes);
+        else
+            this.phantomEye.draw(canvas, this.editor.shapes, '#0b4161', 2);
     }
 
     onPointerMove(_ev: PointerEvent, p: Point) {
-        this.activeEye = new Eye(p);
+        this.phantomEye.pos = Object.assign({}, p);
+        this.phantomEye.rays = undefined;
+        if (this.activeEye) {
+            this.activeEye.dist = vecLen(this.activeEye.pos, p);
+            this.activeEye.lookAt(p);
+        }
+    }
+
+    onPointerDown(_ev: PointerEvent, p: Point) {
+        this.activeEye ??= new Eye(p);
     }
 
     onPointerUp(): void {
-        if (this.activeEye)
+        if (this.activeEye) {
+            this.activeEye.fov = Math.PI / 2;
             this.editor.eyes.push(this.activeEye);
+            this.activeEye = undefined;
+        }
     }
 }
 
@@ -445,12 +468,19 @@ export default class LevelEditor extends Scene {
         this.toolBar.addButton('✏️', 'click to draw polygon, click existing point to finalise', () => this.activeTool = new PolygonTool(this));
         this.toolBar.addButton('➖', 'click to remove wall or eye', () => this.activeTool = new RemoveTool(this));
         this.toolBar.addButton('👁', 'cast rays', () => this.activeTool = new EyeTool(this));
-        this.toolBar.addButton('🔄', 'toggle menu bar orientation', () => this.toolBar.anchor = this.toolBar.anchor === 'top' ? 'left' : 'top', 'momentary');
         this.toolBar.latchedIdx = 1;
 
+        const autoLoadButton = this.saveBar.addButton('A', 'auto-load scene',
+            active => localStorage.setItem('levelEditor.autoLoad', active ? 'true' : 'false'),
+            'toggle'
+        );
         this.saveBar.addButton('📤', 'load scene', () => this.load('quicksave'), 'momentary');
         this.saveBar.addButton('💾', 'save scene', () => this.save('quicksave'), 'momentary');
         this.saveBar.addButton('🚮', 'clear scene', () => this.clear(), 'momentary');
+
+        autoLoadButton.pressed = (localStorage.getItem('levelEditor.autoLoad') ?? 'true') === 'true';
+        if (autoLoadButton.pressed)
+            this.load('quicksave');
 
         this.canvas.onResize = () => this.saveBar.origin = { x: 0, y: this.canvas.size.h };
     }

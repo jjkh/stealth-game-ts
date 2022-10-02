@@ -62,12 +62,13 @@ export default class ButtonBar {
         });
     }
 
-    addButton(name: string, caption: string, action: (active: boolean) => void, kind: 'latching' | 'toggle' | 'momentary' = 'latching') {
+    addButton(name: string, caption: string, action: (active: boolean) => void, kind: 'latching' | 'toggle' | 'momentary' = 'latching'): Button {
         const button = new Button(this.buttonRect(this.buttons.length), name, caption, action, kind);
         if (this.latchedIdx === this.buttons.length)
             button.pressed = true;
 
         this.buttons.push(button);
+        return button;
     }
 
     draw(canvas: Canvas) {
