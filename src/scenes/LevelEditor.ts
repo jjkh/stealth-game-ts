@@ -137,18 +137,18 @@ class RevArray<T> extends Array<T> {
 }
 
 class Eye implements Draggable {
+    readonly snap = false;
     pos: Point;
     angle = 0;
-    readonly snap = false;
 
+    // defaults
     fov = Math.PI / 2;
-    dist = 300;
+    dist = 200;
 
     rays?: LineSegment[];
 
     constructor(p: Point) {
         this.pos = Object.assign({}, p);
-        this.angle = 0;
     }
 
     public get origin(): Point { return this.pos; }
@@ -441,12 +441,15 @@ class EyeTool extends Tool {
 
     onPointerDown(_ev: PointerEvent, p: Point) {
         this.activeEye ??= new Eye(p);
+        this.activeEye.dist = 1;
     }
 
     onPointerUp(): void {
         if (this.activeEye) {
-            this.activeEye.fov = Math.PI / 2;
-            this.editor.eyes.push(this.activeEye);
+            if (this.activeEye.dist > 10) {
+                this.activeEye.fov = Math.PI / 2;
+                this.editor.eyes.push(this.activeEye);
+            }
             this.activeEye = undefined;
         }
     }
