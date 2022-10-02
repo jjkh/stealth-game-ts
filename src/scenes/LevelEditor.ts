@@ -32,11 +32,14 @@ interface Draggable {
 }
 
 interface Shape extends Draggable {
+    readonly kind: string;
     colour: string;
     border: string;
 
     cornersForPoint(p: Point): Point[];
     draw(canvas: Canvas): void;
+
+    serialize(): any;
 }
 
 class LineSegment {
@@ -182,9 +185,8 @@ class Eye implements Draggable {
     }
 
     castRays(shapes: Shape[]) {
-
         this.rays = [];
-        for (const wall of shapes)
+        for (const wall of shapes) {
             for (const corner of wall.cornersForPoint(this.pos)) {
                 const length = Math.hypot(corner.x - this.pos.x, corner.y - this.pos.y);
                 if (length > this.dist || length === 0)
@@ -198,6 +200,25 @@ class Eye implements Draggable {
                     continue;
                 this.rays.push(new LineSegment(this.pos, corner));
             }
+        }
+    }
+
+    serialize(): any {
+        return {
+            pos: this.pos,
+            angle: this.angle,
+            fov: Math.PI / 2,
+            dist: 300,
+        };
+    }
+
+    static deserialize(raw: any): Eye {
+        const eye = new Eye(raw.pos);
+        eye.angle = raw.angle;
+        eye.fov = raw.fov;
+        eye.dist = raw.dist;
+
+        return eye;
     }
 }
 
@@ -411,19 +432,61 @@ class EyeTool extends Tool {
 export default class LevelEditor extends Scene {
     shapes: RevArray<Shape> = new RevArray<Shape>();
     eyes: Eye[] = [];
-    buttonBar = new ButtonBar();
+    toolBar = new ButtonBar({ x: 0, y: 0 }, 'top');
+    saveBar = new ButtonBar({ x: 0, y: this.canvas.size.h }, 'bottom');
     activeTool: Tool = new BoxTool(this);
 
     constructor(canvas: Canvas) {
         super(canvas);
 
-        this.buttonBar.addButton('🖐', 'drag wall/eye to move', () => this.activeTool = new HandTool(this));
-        this.buttonBar.addButton('⬛️', 'click to add box', () => this.activeTool = new BoxTool(this));
-        this.buttonBar.addButton('⚫️', 'click to add circle', () => this.activeTool = new CircleTool(this));
-        this.buttonBar.addButton('✏️', 'click to draw polygon, click existing point to finalise', () => this.activeTool = new PolygonTool(this));
-        this.buttonBar.addButton('➖', 'click to remove wall or eye', () => this.activeTool = new RemoveTool(this));
-        this.buttonBar.addButton('👁', 'cast rays', () => this.activeTool = new EyeTool(this));
-        this.buttonBar.activeButtonIdx = 1;
+        this.toolBar.addButton('🖐', 'drag wall/eye to move', () => this.activeTool = new HandTool(this));
+        this.toolBar.addButton('⬛️', 'click to add box', () => this.activeTool = new BoxTool(this));
+        this.toolBar.addButton('⚫️', 'click to add circle', () => this.activeTool = new CircleTool(this));
+        this.toolBar.addButton('✏️', 'click to draw polygon, click existing point to finalise', () => this.activeTool = new PolygonTool(this));
+        this.toolBar.addButton('➖', 'click to remove wall or eye', () => this.activeTool = new RemoveTool(this));
+        this.toolBar.addButton('👁', 'cast rays', () => this.activeTool = new EyeTool(this));
+        this.toolBar.addButton('🔄', 'toggle menu bar orientation', () => this.toolBar.anchor = this.toolBar.anchor === 'top' ? 'left' : 'top', 'momentary');
+        this.toolBar.latchedIdx = 1;
+
+        this.saveBar.addButton('📤', 'load scene', () => this.load('quicksave'), 'momentary');
+        this.saveBar.addButton('💾', 'save scene', () => this.save('quicksave'), 'momentary');
+        this.saveBar.addButton('🚮', 'clear scene', () => this.clear(), 'momentary');
+
+        this.canvas.onResize = () => this.saveBar.origin = { x: 0, y: this.canvas.size.h };
+    }
+
+    save(saveName: string) {
+        localStorage.setItem('save.' + saveName, JSON.stringify({ shapes: this.shapes, eyes: this.eyes }));
+    }
+
+    load(saveName: string) {
+        this.clear();
+
+        const levelString = localStorage.getItem('save.' + saveName) ?? '{}';
+        const level = JSON.parse(levelString) ?? {};
+        if ('shapes' in level) {
+            for (const rawShape of level.shapes) {
+                const shape = rawShape as Shape;
+                switch (shape.kind) {
+                    case 'polygon':
+                        this.shapes.push(Polygon.deserialize(shape));
+                        break;
+                    case 'circle':
+                        this.shapes.push(Circle.deserialize(shape));
+                        break;
+                    case 'box':
+                        this.shapes.push(Box.deserialize(shape));
+                        break;
+                }
+            }
+        }
+        if ('eyes' in level)
+            this.eyes = level.eyes.map((e: any) => Eye.deserialize(e));
+    }
+
+    clear() {
+        this.shapes = new RevArray<Shape>();
+        this.eyes = [];
     }
 
     drawGrid() {
@@ -451,22 +514,27 @@ export default class LevelEditor extends Scene {
         }
 
         this.activeTool.draw?.(this.canvas);
-        this.buttonBar.draw(this.canvas);
+        this.toolBar.draw(this.canvas);
+        this.saveBar.draw(this.canvas);
     }
 
     onPointerUp(ev: PointerEvent, p: Point) {
-        if (this.buttonBar.onPointerUp(p))
+        if (this.toolBar.onPointerUp(p) || this.saveBar.onPointerUp(p))
             return;
 
         this.activeTool.onPointerUp?.(ev, p);
     }
 
     onPointerDown(ev: PointerEvent, p: Point) {
+        if (this.toolBar.onPointerDown(p) || this.saveBar.onPointerDown(p))
+            return;
+
         this.activeTool.onPointerDown?.(ev, p);
     }
 
     onPointerMove(ev: PointerEvent, p: Point) {
-        this.buttonBar.onPointerMove(p);
+        this.toolBar.onPointerMove(p);
+        this.saveBar.onPointerMove(p);
         this.activeTool.onPointerMove?.(ev, p);
     }
 
@@ -477,11 +545,12 @@ export default class LevelEditor extends Scene {
 
     onKeyDown(ev: KeyboardEvent): void {
         if (ev.key === 'Escape')
-            this.buttonBar.activeButtonIdx = 0;
+            this.toolBar.latchedIdx = 0;
     }
 }
 
 class Polygon implements Shape {
+    readonly kind = 'polygon';
     corners: Point[];
     colour = '#ccf';
     border = '#337';
@@ -577,9 +646,27 @@ class Polygon implements Shape {
         return inside;
     }
 
+    serialize(): any {
+        return {
+            kind: this.kind,
+            colour: this.colour,
+            border: this.border,
+            corners: this.corners,
+        };
+    }
+
+    static deserialize(raw: any): Polygon {
+        const polygon = new Polygon({ x: 0, y: 0 });
+        polygon.colour = raw.colour;
+        polygon.border = raw.border;
+        polygon.corners = raw.corners;
+
+        return polygon;
+    }
 }
 
 class Box implements Shape {
+    readonly kind = 'box';
     rect: Rect;
     colour: string = '#cfc';
     border: string = '#373';
@@ -654,10 +741,27 @@ class Box implements Shape {
         canvas.ctx.lineWidth = 2;
         canvas.strokeRect(grow(this.rect, -1));
     }
+
+    serialize(): any {
+        return {
+            kind: this.kind,
+            colour: this.colour,
+            border: this.border,
+            rect: this.rect,
+        };
+    }
+
+    static deserialize(raw: any): Box {
+        const rect = new Box(raw.rect);
+        rect.colour = raw.colour;
+        rect.border = raw.border;
+
+        return rect;
+    }
 }
 
-
 class Circle implements Shape {
+    readonly kind = 'circle';
     colour: string = '#fcc';
     border: string = '#f33';
     readonly snap = true;
@@ -693,5 +797,24 @@ class Circle implements Shape {
         canvas.ctx.strokeStyle = this.border;
         canvas.ctx.lineWidth = 2;
         canvas.strokeCircle(this.origin, this.radius - 0.5);
+    }
+
+    serialize(): any {
+        return {
+            kind: this.kind,
+            colour: this.colour,
+            border: this.border,
+            radius: this.radius,
+            origin: this.origin
+        };
+    }
+
+    static deserialize(raw: any): Circle {
+        const circle = new Circle(raw.origin);
+        circle.colour = raw.colour;
+        circle.border = raw.border;
+        circle.radius = raw.radius;
+
+        return circle;
     }
 }
