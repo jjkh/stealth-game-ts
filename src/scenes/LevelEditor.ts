@@ -8,19 +8,11 @@ const EYE_RADIUS = 6;
 const grow = (r: Rect, s: number) => { return { x: r.x - s / 2, y: r.y - s / 2, w: r.w + s, h: r.h + s }; };
 const snapTopLeft = (p: Point) => { return { x: Math.floor(p.x / GRID_STEP) * GRID_STEP, y: Math.floor(p.y / GRID_STEP) * GRID_STEP }; };
 const snapCentre = (p: Point) => { return { x: Math.round(p.x / GRID_STEP) * GRID_STEP, y: Math.round(p.y / GRID_STEP) * GRID_STEP }; };
-const overlaps = (a: Rect, b: Rect) =>
-    a.x < (b.x + b.w)
-    && (a.x + a.w) > b.x
-    && a.y < (b.y + b.h)
-    && (a.y + a.h) > b.y;
-const crossProduct = (a: Point, b: Point) => a.x * b.y - b.x * a.y;
 const circleContains = (centre: Point, radius: number, p: Point) => (p.x - centre.x) ** 2 + (p.y - centre.y) ** 2 < radius ** 2;
 const unitVector = (o: Point, p: Point) => {
     const diff = { x: p.x - o.x, y: p.y - o.y };
     const len = Math.hypot(diff.x, diff.y);
-    if (len === 0)
-        return undefined;
-
+    if (len === 0) return undefined;
     return { x: diff.x / len, y: diff.y / len };
 };
 const vecLen = (a: Point, b: Point) => Math.hypot(b.x - a.x, b.y - a.y);
@@ -52,48 +44,32 @@ class LineSegment {
         this.end = Object.assign({}, end);
     }
 
-    gradient(): number | undefined {
-        if (this.start.x === this.end.x)
-            return undefined;
-        return (this.end.y - this.start.y) / (this.end.x - this.start.x);
-    }
+    // https://gorillasun.de/blog/an-algorithm-for-polygon-intersections#5
+    // http://paulbourke.net/geometry/pointlineplane/
+    intersection(b: LineSegment): Point | undefined {
+        const a = this;
 
-    intersects(other: LineSegment): Point | null {
-        if (!overlaps(this.boundingRect(), other.boundingRect()))
-            return null;
+        if ((a.start.x === a.end.x && a.start.y === a.end.y) || (b.start.x === b.end.x && b.start.y === b.end.y))
+            // line has length 0
+            return;
 
-        if (!this.touchesOrCrossesLine(other) || !other.touchesOrCrossesLine(this))
-            return null;
+        const denominator = ((b.end.y - b.start.y) * (a.end.x - a.start.x) - (b.end.x - b.start.x) * (a.end.y - a.start.y));
+        if (denominator === 0)
+            // lines are parallel
+            return;
 
-        return Object.assign({}, this.intersection(other));
-    }
+        let ua = ((b.end.x - b.start.x) * (a.start.y - b.start.y) - (b.end.y - b.start.y) * (a.start.x - b.start.x)) / denominator;
+        let ub = ((a.end.x - a.start.x) * (a.start.y - b.start.y) - (a.end.y - a.start.y) * (a.start.x - b.start.x)) / denominator;
 
-    // should only be called if it's known that the lines overlap
-    intersection(other: LineSegment): Point {
-        if (other.pointOnLine(this.start))
-            return this.start;
+        if (ua < 0 || ua > 1 || ub < 0 || ub > 1)
+            // intersection does not occur along the segments
+            return;
 
-        const ma = this.gradient();
-        const mb = other.gradient();
-        if (ma === mb) {
-            // slope is the same, so lines must be overlapping
-            // TODO: get the closest point to a.start
-            console.log('TODO: same slope, overlapping lines', ma, mb);
-            return this.start;
-        } else if (ma === undefined) {
-            // a is vertical
-            const t = other.start.y - mb! * other.start.x;
-            return { x: this.start.x, y: this.start.x * mb! + t };
-        } else if (mb === undefined) {
-            // b is vertical
-            const t = other.start.y - mb! * other.start.x;
-            return { x: this.start.x, y: this.start.x * mb! + t };
-        }
-
-        const ta = this.start.y - ma * this.start.x;
-        const tb = other.start.y - mb * other.start.x;
-        const x = (tb - ta) / (ma - mb);
-        return { x: x, y: ma * x + ta };
+        // return a object with the x and y coordinates of the intersection
+        return {
+            x: a.start.x + ua * (a.end.x - a.start.x),
+            y: a.start.y + ua * (a.end.y - a.start.y),
+        };
     }
 
     boundingRect(): Rect {
@@ -101,31 +77,6 @@ class LineSegment {
         const y = [this.start.y, this.end.y].sort((a, b) => a - b);
 
         return { x: x[0], y: y[0], w: x[1] - x[0], h: y[1] - y[0] };
-    }
-
-    pointOnLine(p: Point): boolean {
-        const diffLine = this.difference();
-        const relPoint = { x: p.x - this.start.x, y: p.y - this.start.y };
-
-        const r = crossProduct(diffLine.end, relPoint);
-        return Math.abs(r) < 0.0001;
-    }
-
-    pointRightOfLine(p: Point): boolean {
-        const diffLine = this.difference();
-        const relPoint = { x: p.x - this.start.x, y: p.y - this.start.y };
-
-        return crossProduct(diffLine.end, relPoint) > 0;
-    }
-
-    touchesOrCrossesLine(other: LineSegment): boolean {
-        return this.pointOnLine(other.start)
-            || this.pointOnLine(other.end)
-            || (this.pointRightOfLine(other.start) != this.pointRightOfLine(other.end));
-    }
-
-    difference(): LineSegment {
-        return new LineSegment({ x: 0, y: 0 }, { x: this.end.x - this.start.x, y: this.end.y - this.start.y });
     }
 }
 
@@ -188,16 +139,16 @@ class Eye implements Draggable {
 
     castRays(shapes: Shape[]) {
         this.rays = [];
-        for (const wall of shapes) {
-            for (const corner of wall.cornersForPoint(this.pos)) {
+        for (const shape of shapes) {
+            for (const corner of shape.cornersForPoint(this.pos)) {
                 const length = Math.hypot(corner.x - this.pos.x, corner.y - this.pos.y);
                 if (length === 0 || length > this.dist)
                     continue;
 
                 const vec = unitVector(this.pos, corner)!;
                 const angle = Math.atan2(vec.y, vec.x);
-                let diff = angle - this.angle
-                diff += diff > Math.PI ? -2 * Math.PI : (diff < -Math.PI ? 2 * Math.PI : 0)
+                let diff = angle - this.angle;
+                diff += diff > Math.PI ? -2 * Math.PI : (diff < -Math.PI ? 2 * Math.PI : 0);
 
                 if (diff < this.fov / 2 && diff > -this.fov / 2)
                     this.rays.push(new LineSegment(this.pos, corner));
@@ -617,7 +568,9 @@ class Polygon implements Shape {
                 if (edge.end.x === corner.x && edge.end.y === corner.y)
                     continue;
 
-                if (lineSeg.intersects(edge)) {
+                const p = lineSeg.intersection(edge);
+                console.log(p);
+                if (p) {
                     intersects = true;
                     break;
                 }
@@ -742,25 +695,6 @@ class Box implements Shape {
             corners.add(bottomRight);
         }
         return [...corners.values()];
-    }
-
-    intersects(line: LineSegment): Point | null {
-        const lines: LineSegment[] = [];
-        if (this.left > line.start.x)
-            lines.push(new LineSegment({ x: this.left, y: this.top }, { x: this.left, y: this.bottom }));     // left
-        else if (this.right < line.start.x)
-            lines.push(new LineSegment({ x: this.right, y: this.top }, { x: this.right, y: this.bottom }));   // right
-
-        if (this.top > line.start.y)
-            lines.push(new LineSegment({ x: this.left, y: this.top }, { x: this.right, y: this.top }));       // top
-        else if (this.bottom < line.start.y)
-            lines.push(new LineSegment({ x: this.left, y: this.bottom }, { x: this.right, y: this.bottom })); // bottom
-
-        for (const rectSide of lines) {
-            const p = rectSide.intersects(line);
-            if (p !== null) return p;
-        }
-        return null;
     }
 
     contains(p: Point): boolean {
