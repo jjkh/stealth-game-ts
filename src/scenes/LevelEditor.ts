@@ -160,8 +160,8 @@ class Eye implements Draggable {
         return {
             pos: this.pos,
             angle: this.angle,
-            fov: Math.PI / 2,
-            dist: 300,
+            fov: this.fov,
+            dist: this.dist,
         };
     }
 
