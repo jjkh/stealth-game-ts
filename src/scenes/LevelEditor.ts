@@ -568,9 +568,7 @@ class Polygon implements Shape {
                 if (edge.end.x === corner.x && edge.end.y === corner.y)
                     continue;
 
-                const p = lineSeg.intersection(edge);
-                console.log(p);
-                if (p) {
+                if (lineSeg.intersection(edge) !== undefined) {
                     intersects = true;
                     break;
                 }
