@@ -29,8 +29,9 @@ interface Shape extends Draggable {
     colour: string;
     border: string;
 
-    cornersForPoint(p: Point): Point[];
     draw(canvas: Canvas): void;
+    cornersForPoint(p: Point): Point[];
+    intersects(seg: LineSegment): boolean;
 
     serialize(): any;
 }
@@ -78,6 +79,16 @@ class LineSegment {
 
         return { x: x[0], y: y[0], w: x[1] - x[0], h: y[1] - y[0] };
     }
+
+    // https://stackoverflow.com/a/16561333
+    pseudoAngle(): number {
+        const d = { x: this.end.x - this.start.x, y: this.end.y - this.start.y };
+        const p = d.x / (Math.abs(d.x) + Math.abs(d.y)); // -1..1 increasing with x
+        if (d.y < 0)
+            return p - 1;  // -2..0 increasing with x
+        else
+            return 1 - p;  // 0..2 decreasing with x
+    }
 }
 
 class RevArray<T> extends Array<T> {
@@ -121,12 +132,18 @@ class Eye implements Draggable {
     draw(canvas: Canvas, shapes: Shape[], colour = '#000', lineWidth = 1) {
         canvas.ctx.strokeStyle = colour;
         canvas.ctx.lineWidth = lineWidth;
+        // -- debug --
+        canvas.ctx.fillStyle = '#000';
+        canvas.fontSize = 15;
+        // -----------
 
         if (this.rays === undefined)
             this.castRays(shapes);
 
-        for (const ray of this.rays!)
+        for (const [i, ray] of this.rays!.entries()) {
             canvas.drawLine(ray.start, ray.end);
+            canvas.drawText(`${i}`, ray.end);
+        }
 
         canvas.ctx.globalAlpha = 0.1;
         canvas.ctx.beginPath();
@@ -138,7 +155,8 @@ class Eye implements Draggable {
     }
 
     castRays(shapes: Shape[]) {
-        this.rays = [];
+        let potentialRays = [];
+
         for (const shape of shapes) {
             for (const corner of shape.cornersForPoint(this.pos)) {
                 const length = Math.hypot(corner.x - this.pos.x, corner.y - this.pos.y);
@@ -151,9 +169,28 @@ class Eye implements Draggable {
                 diff += diff > Math.PI ? -2 * Math.PI : (diff < -Math.PI ? 2 * Math.PI : 0);
 
                 if (diff < this.fov / 2 && diff > -this.fov / 2)
-                    this.rays.push(new LineSegment(this.pos, corner));
+                    potentialRays.push(this.ray(angle));
             }
         }
+        potentialRays = potentialRays.sort((a, b) => a.pseudoAngle() - b.pseudoAngle());
+
+        const startRay = this.ray(this.angle - this.fov / 2);
+        const endRay = this.ray(this.angle + this.fov / 2);
+        const discontinuityIndex = potentialRays.findIndex(line => line.pseudoAngle() > startRay.pseudoAngle());
+        if (discontinuityIndex < 0) {
+            this.rays = [startRay, ...potentialRays, endRay];
+        } else {
+            this.rays = [
+                startRay,
+                ...potentialRays.slice(discontinuityIndex),
+                ...potentialRays.slice(0, discontinuityIndex),
+                endRay,
+            ];
+        }
+    }
+
+    ray(angle: number, dist = this.dist): LineSegment {
+        return new LineSegment(this.pos, { x: this.pos.x + dist * Math.cos(angle), y: this.pos.y + dist * Math.sin(angle) });
     }
 
     serialize(): any {
@@ -560,24 +597,23 @@ class Polygon implements Shape {
         const edges = [...this.lines()].map(([a, b]) => new LineSegment(a, b));
         const corners: Point[] = [];
         for (const corner of this.corners) {
+            if (corners.some(a => a.x === corner.x && a.y === corner.y))
+                continue;
             const lineSeg = new LineSegment(p, corner);
-            let intersects = false;
-            for (const edge of edges) {
-                if (edge.start.x === corner.x && edge.start.y === corner.y)
-                    continue;
-                if (edge.end.x === corner.x && edge.end.y === corner.y)
-                    continue;
+            const unobstructed = edges.every(edge => (edge.start.x === corner.x && edge.start.y === corner.y)
+                || (edge.end.x === corner.x && edge.end.y === corner.y)
+                || edge.intersection(lineSeg) === undefined);
 
-                if (lineSeg.intersection(edge) !== undefined) {
-                    intersects = true;
-                    break;
-                }
-            }
-            if (!intersects)
+            if (unobstructed)
                 corners.push(corner);
         }
 
         return corners;
+    }
+
+    // TODO: make this correct
+    intersects(seg: LineSegment): boolean {
+        return this.contains(seg.start) || this.contains(seg.end);
     }
 
     boundingRect(): Rect {
@@ -695,6 +731,11 @@ class Box implements Shape {
         return [...corners.values()];
     }
 
+    // TODO: make this correct
+    intersects(seg: LineSegment): boolean {
+        return this.contains(seg.start) || this.contains(seg.end);
+    }
+
     contains(p: Point): boolean {
         return contains(this.rect, p);
     }
@@ -750,6 +791,11 @@ class Circle implements Shape {
             { x: this.origin.x + Math.cos(d + th) * this.radius, y: this.origin.y + Math.sin(d + th) * this.radius },
             { x: this.origin.x + Math.cos(d - th) * this.radius, y: this.origin.y + Math.sin(d - th) * this.radius },
         ];
+    }
+
+    // TODO: make this correct
+    intersects(seg: LineSegment): boolean {
+        return this.contains(seg.start) || this.contains(seg.end);
     }
 
     contains(p: Point): boolean {
