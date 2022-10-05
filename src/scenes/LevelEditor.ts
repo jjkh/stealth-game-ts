@@ -31,7 +31,7 @@ interface Shape extends Draggable {
 
     draw(canvas: Canvas): void;
     cornersForPoint(p: Point): Point[];
-    intersects(seg: LineSegment): boolean;
+    intersection(seg: LineSegment): Point | undefined;
 
     serialize(): any;
 }
@@ -107,7 +107,8 @@ class Eye implements Draggable {
     fov = Math.PI / 2;
     dist = 200;
 
-    rays?: LineSegment[];
+    rays?: [LineSegment, Point | undefined][];
+    path?: Path2D;
 
     constructor(p: Point) {
         this.pos = Object.assign({}, p);
@@ -129,34 +130,38 @@ class Eye implements Draggable {
         this.rays = undefined;
     }
 
-    draw(canvas: Canvas, shapes: Shape[], colour = '#000', lineWidth = 1) {
+    draw(canvas: Canvas, shapes: Shape[], colour = '#000', lineWidth = 2) {
         canvas.ctx.strokeStyle = colour;
         canvas.ctx.lineWidth = lineWidth;
-        // -- debug --
-        canvas.ctx.fillStyle = '#000';
-        canvas.fontSize = 15;
-        // -----------
 
         if (this.rays === undefined)
             this.castRays(shapes);
 
-        for (const [i, ray] of this.rays!.entries()) {
-            canvas.drawLine(ray.start, ray.end);
-            canvas.drawText(`${i}`, ray.end);
+
+        if (this.path) {
+            canvas.ctx.stroke(this.path);
+
+            canvas.ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+            canvas.ctx.fill(this.path);
         }
 
-        canvas.ctx.globalAlpha = 0.1;
-        canvas.ctx.beginPath();
-        canvas.ctx.moveTo(this.pos.x, this.pos.y);
-        canvas.ctx.arc(this.pos.x, this.pos.y, this.dist, this.angle - this.fov / 2, this.angle + this.fov / 2);
-        canvas.ctx.fillStyle = colour;
-        canvas.ctx.fill();
-        canvas.ctx.globalAlpha = 1;
+        // -- debug --
+        canvas.ctx.strokeStyle = '#0cc';
+        canvas.ctx.lineWidth = lineWidth / 2;
+        for (const [i, [ray, intersect]] of this.rays!.entries()) {
+            canvas.drawLine(ray.start, ray.end);
+            if (intersect)
+                canvas.fillCircle(intersect, 2, '#f00');
+
+            canvas.ctx.fillStyle = intersect ? '#000' : '#c00';
+            canvas.fontSize = 15;
+            canvas.drawText(`${i}`, ray.end);
+        }
+        // -----------
     }
 
     castRays(shapes: Shape[]) {
-        let potentialRays = [];
-
+        let potentialAngles: [corner: Point, angle: number][] = [];
         for (const shape of shapes) {
             for (const corner of shape.cornersForPoint(this.pos)) {
                 const length = Math.hypot(corner.x - this.pos.x, corner.y - this.pos.y);
@@ -169,24 +174,54 @@ class Eye implements Draggable {
                 diff += diff > Math.PI ? -2 * Math.PI : (diff < -Math.PI ? 2 * Math.PI : 0);
 
                 if (diff < this.fov / 2 && diff > -this.fov / 2)
-                    potentialRays.push(this.ray(angle));
+                    potentialAngles.push([corner, angle]);
             }
         }
-        potentialRays = potentialRays.sort((a, b) => a.pseudoAngle() - b.pseudoAngle());
+        potentialAngles = potentialAngles.sort((a, b) => this.ray(a[1]).pseudoAngle() - this.ray(b[1]).pseudoAngle());
 
-        const startRay = this.ray(this.angle - this.fov / 2);
-        const endRay = this.ray(this.angle + this.fov / 2);
-        const discontinuityIndex = potentialRays.findIndex(line => line.pseudoAngle() > startRay.pseudoAngle());
-        if (discontinuityIndex < 0) {
-            this.rays = [startRay, ...potentialRays, endRay];
-        } else {
-            this.rays = [
-                startRay,
-                ...potentialRays.slice(discontinuityIndex),
-                ...potentialRays.slice(0, discontinuityIndex),
-                endRay,
-            ];
+        const startAngle = this.angle - this.fov / 2;
+        const endAngle = this.angle + this.fov / 2;
+        const startRay = this.ray(startAngle);
+        const endRay = this.ray(endAngle);
+        const startIndex = potentialAngles.findIndex(([_, angle]) => this.ray(angle).pseudoAngle() > startRay.pseudoAngle());
+
+        const orderedAngles: [corner: Point, angle: number][] = (startIndex < 0)
+            ? [[startRay.end, startAngle], ...potentialAngles, [endRay.end, endAngle]]
+            : [[startRay.end, startAngle],
+            ...potentialAngles.slice(startIndex),
+            ...potentialAngles.slice(0, startIndex),
+            [endRay.end, endAngle]];
+
+        const lines: [corner: Point, angle: number, intersection: Point | undefined][] = orderedAngles.map(([corner, angle]) => {
+            const intersections = (shapes
+                .map(shape => shape.intersection(this.ray(angle)))
+                .filter(p => p) as Point[])
+                .sort((a, b) => vecLen(this.pos, a) - vecLen(this.pos, b));
+
+            return [corner, angle, intersections[0]];
+        });
+
+        const path = new Path2D();
+        path.moveTo(this.pos.x, startRay.start.y);
+        for (let i = 0; i < lines.length - 1; i++) {
+            const [_c1, a1, i1] = lines[i];
+            const [_c2, a2, _i2] = lines[i + 1];
+
+            if (i1) {
+                path.lineTo(i1.x, i1.y);
+            } else {
+                path.arc(
+                    this.pos.x, this.pos.y,
+                    this.dist,
+                    a1,
+                    a2,
+                );
+            }
         }
+        path.lineTo(endRay.start.x, endRay.start.y);
+        this.path = path;
+
+        this.rays = lines.map(([_, angle, intersection]) => [this.ray(angle), intersection]);
     }
 
     ray(angle: number, dist = this.dist): LineSegment {
@@ -612,8 +647,14 @@ class Polygon implements Shape {
     }
 
     // TODO: make this correct
-    intersects(seg: LineSegment): boolean {
-        return this.contains(seg.start) || this.contains(seg.end);
+    intersection(line: LineSegment): Point | undefined {
+        const intersections: Point[] = [];
+        for (let [p1, p2] of this.lines()) {
+            const intersection = line.intersection(new LineSegment(p1, p2));
+            if (intersection)
+                intersections.push(intersection);
+        }
+        return intersections.sort((a, b) => vecLen(line.start, a) - vecLen(line.start, b))[0];
     }
 
     boundingRect(): Rect {
@@ -732,8 +773,8 @@ class Box implements Shape {
     }
 
     // TODO: make this correct
-    intersects(seg: LineSegment): boolean {
-        return this.contains(seg.start) || this.contains(seg.end);
+    intersection(_seg: LineSegment): Point | undefined {
+        return;
     }
 
     contains(p: Point): boolean {
@@ -794,8 +835,8 @@ class Circle implements Shape {
     }
 
     // TODO: make this correct
-    intersects(seg: LineSegment): boolean {
-        return this.contains(seg.start) || this.contains(seg.end);
+    intersection(_seg: LineSegment): Point | undefined {
+        return;
     }
 
     contains(p: Point): boolean {
