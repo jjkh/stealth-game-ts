@@ -2,7 +2,7 @@ import ButtonBar from "../lib/ButtonBar";
 import Canvas, { contains, Point, Rect } from "../lib/Canvas";
 import Scene from "../lib/Scene";
 
-const GRID_STEP = 16;
+const GRID_STEP = 10;
 const EYE_RADIUS = 6;
 
 const grow = (r: Rect, s: number) => { return { x: r.x - s / 2, y: r.y - s / 2, w: r.w + s, h: r.h + s }; };
@@ -130,32 +130,22 @@ class Eye implements Draggable {
         this.rays = undefined;
     }
 
-    draw(canvas: Canvas, shapes: Shape[], colour = '#000', lineWidth = 2) {
-        canvas.ctx.strokeStyle = colour;
-        canvas.ctx.lineWidth = lineWidth;
-
+    draw(canvas: Canvas, shapes: Shape[], colour = 'rgba(0, 0, 0, 0.15)') {
         if (this.rays === undefined)
             this.castRays(shapes);
 
-
         if (this.path) {
-            canvas.ctx.stroke(this.path);
-
-            canvas.ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+            canvas.ctx.fillStyle = colour;
             canvas.ctx.fill(this.path);
         }
 
         // -- debug --
         canvas.ctx.strokeStyle = '#0cc';
-        canvas.ctx.lineWidth = lineWidth / 2;
-        for (const [i, [ray, intersect]] of this.rays!.entries()) {
+        canvas.ctx.lineWidth = 1;
+        for (const [ray, intersect] of this.rays!) {
             canvas.drawLine(ray.start, ray.end);
             if (intersect)
                 canvas.fillCircle(intersect, 2, '#f00');
-
-            canvas.ctx.fillStyle = intersect ? '#000' : '#c00';
-            canvas.fontSize = 15;
-            canvas.drawText(`${i}`, ray.end);
         }
         // -----------
     }
@@ -204,18 +194,37 @@ class Eye implements Draggable {
         const path = new Path2D();
         path.moveTo(this.pos.x, startRay.start.y);
         for (let i = 0; i < lines.length - 1; i++) {
-            const [_c1, a1, i1] = lines[i];
-            const [_c2, a2, _i2] = lines[i + 1];
+            const [c1, a1, i1] = lines[i];
+            const [c2, a2, i2] = lines[i + 1];
+            const midRay = this.ray((a1 + a2) / 2);
+            const midIntersects = shapes.some(shape => shape.intersection(midRay));
 
             if (i1) {
-                path.lineTo(i1.x, i1.y);
+                if (vecLen(this.pos, c1) < vecLen(this.pos, i1))
+                    path.lineTo(c1.x, c1.y);
+                else
+                    path.lineTo(i1.x, i1.y);
+            } else if (midIntersects) {
+                path.lineTo(c1.x, c1.y);
             } else {
+                const ray = this.ray(a1);
+                path.lineTo(ray.end.x, ray.end.y);
+            }
+
+            if (!i1 && !midIntersects) {
                 path.arc(
                     this.pos.x, this.pos.y,
                     this.dist,
                     a1,
                     a2,
                 );
+            } else if (i2) {
+                if (vecLen(this.pos, c2) < vecLen(this.pos, i2))
+                    path.lineTo(c2.x, c2.y);
+                else
+                    path.lineTo(i2.x, i2.y);
+            } else {
+                path.lineTo(c2.x, c2.y);
             }
         }
         path.lineTo(endRay.start.x, endRay.start.y);
@@ -450,7 +459,7 @@ class EyeTool extends Tool {
         if (this.activeEye)
             this.activeEye.draw(canvas, this.editor.shapes);
         else
-            this.phantomEye.draw(canvas, this.editor.shapes, '#0b4161', 2);
+            this.phantomEye.draw(canvas, this.editor.shapes, 'rgba(11, 65, 97, 0.15)');
     }
 
     onPointerMove(_ev: PointerEvent, p: Point) {
@@ -483,7 +492,7 @@ export default class LevelEditor extends Scene {
     eyes: Eye[] = [];
     toolBar = new ButtonBar({ x: 0, y: 0 }, 'top');
     saveBar = new ButtonBar({ x: 0, y: this.canvas.size.h }, 'bottom');
-    activeTool: Tool = new BoxTool(this);
+    activeTool: Tool = new HandTool(this);
 
     constructor(canvas: Canvas) {
         super(canvas);
@@ -494,7 +503,6 @@ export default class LevelEditor extends Scene {
         this.toolBar.addButton('✏️', 'click to draw polygon, click existing point to finalise', () => this.activeTool = new PolygonTool(this));
         this.toolBar.addButton('➖', 'click to remove wall or eye', () => this.activeTool = new RemoveTool(this));
         this.toolBar.addButton('👁', 'cast rays', () => this.activeTool = new EyeTool(this));
-        this.toolBar.latchedIdx = 1;
 
         const autoLoadButton = this.saveBar.addButton('A', 'auto-load scene',
             active => localStorage.setItem('levelEditor.autoLoad', active ? 'true' : 'false'),
@@ -646,12 +654,17 @@ class Polygon implements Shape {
         return corners;
     }
 
-    // TODO: make this correct
     intersection(line: LineSegment): Point | undefined {
+        const approxEqual = (a: Point, b: Point): boolean => {
+            const epsilon = 0.0001;
+            return (a.x > (b.x - epsilon) && a.x < b.x + epsilon)
+                && (a.y > (b.y - epsilon) && a.y < b.y + epsilon);
+        }
+
         const intersections: Point[] = [];
         for (let [p1, p2] of this.lines()) {
             const intersection = line.intersection(new LineSegment(p1, p2));
-            if (intersection)
+            if (intersection && !approxEqual(intersection, p1) && !approxEqual(intersection, p2))
                 intersections.push(intersection);
         }
         return intersections.sort((a, b) => vecLen(line.start, a) - vecLen(line.start, b))[0];
