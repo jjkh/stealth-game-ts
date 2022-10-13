@@ -30,8 +30,9 @@ interface Shape extends Draggable {
     border: string;
 
     draw(canvas: Canvas): void;
-    cornersForPoint(p: Point): Point[];
-    intersection(seg: LineSegment): Point | undefined;
+    cornersForEye(eye: Eye): Point[];
+    arcIntersections(arc: { pos: Point, dist: number }): Point[];
+    lineIntersections(seg: LineSegment): Point | undefined;
 
     serialize(): any;
 }
@@ -153,7 +154,7 @@ class Eye implements Draggable {
     castRays(shapes: Shape[]) {
         let potentialAngles: [corner: Point, angle: number][] = [];
         for (const shape of shapes) {
-            for (const corner of shape.cornersForPoint(this.pos)) {
+            for (const corner of shape.cornersForEye(this)) {
                 const length = Math.hypot(corner.x - this.pos.x, corner.y - this.pos.y);
                 if (length === 0 || length > this.dist)
                     continue;
@@ -175,16 +176,16 @@ class Eye implements Draggable {
         const endRay = this.ray(endAngle);
         const startIndex = potentialAngles.findIndex(([_, angle]) => this.ray(angle).pseudoAngle() > startRay.pseudoAngle());
 
-        const orderedAngles: [corner: Point, angle: number][] = (startIndex < 0)
-            ? [[startRay.end, startAngle], ...potentialAngles, [endRay.end, endAngle]]
-            : [[startRay.end, startAngle],
+        const orderedAngles: [corner: Point | undefined, angle: number][] = (startIndex < 0)
+            ? [[undefined, startAngle], ...potentialAngles, [undefined, endAngle]]
+            : [[undefined, startAngle],
             ...potentialAngles.slice(startIndex),
             ...potentialAngles.slice(0, startIndex),
-            [endRay.end, endAngle]];
+            [undefined, endAngle]];
 
-        const lines: [corner: Point, angle: number, intersection: Point | undefined][] = orderedAngles.map(([corner, angle]) => {
+        const lines: [corner: Point | undefined, angle: number, intersection: Point | undefined][] = orderedAngles.map(([corner, angle]) => {
             const intersections = (shapes
-                .map(shape => shape.intersection(this.ray(angle)))
+                .map(shape => shape.lineIntersections(this.ray(angle)))
                 .filter(p => p) as Point[])
                 .sort((a, b) => vecLen(this.pos, a) - vecLen(this.pos, b));
 
@@ -193,36 +194,45 @@ class Eye implements Draggable {
 
         const path = new Path2D();
         path.moveTo(this.pos.x, startRay.start.y);
+        if (lines[0][2] !== undefined) {
+            path.lineTo(lines[0][2].x, lines[0][2].y)
+        } else {
+            path.lineTo(startRay.end.x, startRay.end.y);
+        }
         for (let i = 0; i < lines.length - 1; i++) {
-            const [c1, a1, i1] = lines[i];
-            const [c2, a2, i2] = lines[i + 1];
+            let [c1, a1, i1] = lines[i];
+            let [c2, a2, i2] = lines[i + 1];
             const midRay = this.ray((a1 + a2) / 2);
-            const midIntersects = shapes.some(shape => shape.intersection(midRay));
-
-            if (i1) {
-                if (vecLen(this.pos, c1) < vecLen(this.pos, i1))
-                    path.lineTo(c1.x, c1.y);
-                else
-                    path.lineTo(i1.x, i1.y);
-            } else if (midIntersects) {
-                path.lineTo(c1.x, c1.y);
-            } else {
-                const ray = this.ray(a1);
-                path.lineTo(ray.end.x, ray.end.y);
-            }
-
-            if (!i1 && !midIntersects) {
+            const midIntersects = shapes.some(shape => shape.lineIntersections(midRay));
+            if (!midIntersects) {
                 path.arc(
                     this.pos.x, this.pos.y,
                     this.dist,
                     a1,
                     a2,
                 );
-            } else if (i2) {
-                if (vecLen(this.pos, c2) < vecLen(this.pos, i2))
+            }
+
+            // debug
+            c1 ??= i1 ??= this.pos;
+            c2 ??= i2 ??= this.pos;
+
+            if (i2 && (vecLen(this.pos, i2) < vecLen(this.pos, c2))) {
+                path.lineTo(i2.x, i2.y);
+                continue;
+            }
+
+            if (i2) {
+                const cToI = new LineSegment(c1, i2);
+                const cToIIntersects = shapes.some(shape => shape.lineIntersections(cToI));
+                if (cToIIntersects)
                     path.lineTo(c2.x, c2.y);
-                else
+                const midPoint = { x: (i2.x + c2.x) / 2, y: (i2.y + c2.y) / 2 };
+                if (!shapes.some(shape => shape.contains(midPoint)))
                     path.lineTo(i2.x, i2.y);
+
+                if (!cToIIntersects)
+                    path.lineTo(c2.x, c2.y);
             } else {
                 path.lineTo(c2.x, c2.y);
             }
@@ -633,16 +643,18 @@ class Polygon implements Shape {
         }
     }
 
-    cornersForPoint(p: Point): Point[] {
-        if (this.contains(p))
+    cornersForEye(eye: Eye): Point[] {
+        if (this.contains(eye.pos))
             return [];
 
-        const edges = [...this.lines()].map(([a, b]) => new LineSegment(a, b));
+        const edges = [...this.lines()]
+            .map(([a, b]) => new LineSegment(a, b));
+
         const corners: Point[] = [];
         for (const corner of this.corners) {
             if (corners.some(a => a.x === corner.x && a.y === corner.y))
                 continue;
-            const lineSeg = new LineSegment(p, corner);
+            const lineSeg = new LineSegment(eye.pos, corner);
             const unobstructed = edges.every(edge => (edge.start.x === corner.x && edge.start.y === corner.y)
                 || (edge.end.x === corner.x && edge.end.y === corner.y)
                 || edge.intersection(lineSeg) === undefined);
@@ -654,7 +666,35 @@ class Polygon implements Shape {
         return corners;
     }
 
-    intersection(line: LineSegment): Point | undefined {
+    arcIntersections(arc: { pos: Point, dist: number }): Point[] {
+        // adapted from https://stackoverflow.com/a/1084899
+        const intersections: Point[] = [];
+        const dot = (a: Point, b: Point) => a.x * b.x + a.y * b.y;
+        for (const [start, end] of this.lines()) {
+            const d = { x: end.x - start.x, y: end.y - start.y };
+            const f = { x: start.x - arc.pos.x, y: start.y - arc.pos.y };
+
+            const a = dot(d, d);
+            const b = 2 * dot(f, d);
+            const c = dot(f, f) - arc.dist ** 2;
+
+            const discriminant = b * b - 4 * a * c;
+            if (discriminant >= 0) {
+                const det = Math.sqrt(discriminant);
+
+                // either solution may be on or off the ray so need to test both
+                // t1 is always the smaller value, because BOTH discriminant and
+                // a are nonnegative.
+                [(-b - det) / (2 * a), (-b + det) / (2 * a)]
+                    .filter(t => t > 0 && t < 1)
+                    .map(t => intersections.push({ x: start.x + d.x * t, y: start.y + d.y * t }));
+            }
+        }
+
+        return intersections;
+    }
+
+    lineIntersections(line: LineSegment): Point | undefined {
         const approxEqual = (a: Point, b: Point): boolean => {
             const epsilon = 0.0001;
             return (a.x > (b.x - epsilon) && a.x < b.x + epsilon)
@@ -761,33 +801,55 @@ class Box implements Shape {
         this.rect.y = p.y;
     }
 
-    cornersForPoint(p: Point): Point[] {
+    cornersForEye(p: Eye): Point[] {
         const topLeft = { x: this.left, y: this.top };
         const bottomLeft = { x: this.left, y: this.bottom };
         const topRight = { x: this.right, y: this.top };
         const bottomRight = { x: this.right, y: this.bottom };
 
         const corners = new Set<Point>();
-        if (p.x < this.left) {
+        if (p.pos.x < this.left) {
             corners.add(topLeft);
             corners.add(bottomLeft);
-        } else if (p.x > this.right) {
+        } else if (p.pos.x > this.right) {
             corners.add(topRight);
             corners.add(bottomRight);
         }
-        if (p.y < this.top) {
+        if (p.pos.y < this.top) {
             corners.add(topLeft);
             corners.add(topRight);
-        } else if (p.y > this.bottom) {
+        } else if (p.pos.y > this.bottom) {
             corners.add(bottomLeft);
             corners.add(bottomRight);
         }
         return [...corners.values()];
     }
 
+    arcIntersections(_arc: { pos: Point; dist: number; }): Point[] {
+        return [];
+    }
+
     // TODO: make this correct
-    intersection(_seg: LineSegment): Point | undefined {
-        return;
+    lineIntersections(line: LineSegment): Point | undefined {
+        const approxEqual = (a: Point, b: Point): boolean => {
+            const epsilon = 0.0001;
+            return (a.x > (b.x - epsilon) && a.x < b.x + epsilon)
+                && (a.y > (b.y - epsilon) && a.y < b.y + epsilon);
+        }
+
+        const edges = [
+            new LineSegment({ x: this.top, y: this.left }, { x: this.top, y: this.right }),
+            new LineSegment({ x: this.top, y: this.right }, { x: this.bottom, y: this.right }),
+            new LineSegment({ x: this.bottom, y: this.right }, { x: this.bottom, y: this.left }),
+            new LineSegment({ x: this.bottom, y: this.left }, { x: this.top, y: this.left }),
+        ];
+        const intersections: Point[] = [];
+        for (let edge of edges) {
+            const intersection = line.intersection(edge);
+            if (intersection && !approxEqual(intersection, edge.start) && !approxEqual(intersection, edge.end))
+                intersections.push(intersection);
+        }
+        return intersections.sort((a, b) => vecLen(line.start, a) - vecLen(line.start, b))[0];
     }
 
     contains(p: Point): boolean {
@@ -833,8 +895,8 @@ class Circle implements Shape {
         this.origin = Object.assign({}, origin);
     }
 
-    cornersForPoint(p: Point): Point[] {
-        const diff = { x: p.x - this.origin.x, y: p.y - this.origin.y };
+    cornersForEye(p: Eye): Point[] {
+        const diff = { x: p.pos.x - this.origin.x, y: p.pos.y - this.origin.y };
         const length = Math.sqrt(diff.x ** 2 + diff.y ** 2);
 
         if (length <= this.radius) return [];
@@ -848,7 +910,12 @@ class Circle implements Shape {
     }
 
     // TODO: make this correct
-    intersection(_seg: LineSegment): Point | undefined {
+    arcIntersections(_arc: { pos: Point; dist: number; }): Point[] {
+        return [];
+    }
+
+    // TODO: make this correct
+    lineIntersections(_seg: LineSegment): Point | undefined {
         return;
     }
 
