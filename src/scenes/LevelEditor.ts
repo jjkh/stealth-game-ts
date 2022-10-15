@@ -145,29 +145,33 @@ class Eye implements Draggable {
         canvas.ctx.lineWidth = 1;
         for (const [ray, intersect] of this.rays!) {
             canvas.drawLine(ray.start, ray.end);
-            if (intersect)
-                canvas.fillCircle(intersect, 2, '#f00');
+            if (intersect) canvas.fillCircle(intersect, 2, '#f00');
         }
         // -----------
     }
 
     castRays(shapes: Shape[]) {
-        let potentialAngles: [corner: Point, angle: number][] = [];
+        let potentialPoints: Point[] = [];
         for (const shape of shapes) {
-            for (const corner of shape.cornersForEye(this)) {
-                const length = Math.hypot(corner.x - this.pos.x, corner.y - this.pos.y);
-                if (length === 0 || length > this.dist)
-                    continue;
-
-                const vec = unitVector(this.pos, corner)!;
-                const angle = Math.atan2(vec.y, vec.x);
-                let diff = angle - this.angle;
-                diff += diff > Math.PI ? -2 * Math.PI : (diff < -Math.PI ? 2 * Math.PI : 0);
-
-                if (diff < this.fov / 2 && diff > -this.fov / 2)
-                    potentialAngles.push([corner, angle]);
-            }
+            potentialPoints.push(...shape.cornersForEye(this)
+                .filter(corner => {
+                    const length = Math.hypot(corner.x - this.pos.x, corner.y - this.pos.y);
+                    return length > 0 && length < this.dist;
+                }));
+            potentialPoints.push(...shape.arcIntersections(this));
         }
+
+        let potentialAngles: [corner: Point, angle: number][] = [];
+        for (const point of potentialPoints) {
+            const vec = unitVector(this.pos, point)!;
+            const angle = Math.atan2(vec.y, vec.x);
+            let diff = angle - this.angle;
+            diff += diff > Math.PI ? -2 * Math.PI : (diff < -Math.PI ? 2 * Math.PI : 0);
+
+            if (diff < this.fov / 2 && diff > -this.fov / 2)
+                potentialAngles.push([point, angle]);
+        }
+
         potentialAngles = potentialAngles.sort((a, b) => this.ray(a[1]).pseudoAngle() - this.ray(b[1]).pseudoAngle());
 
         const startAngle = this.angle - this.fov / 2;
